@@ -1,0 +1,43 @@
+from pydantic import BaseModel, Field
+
+
+class ChatRequest(BaseModel):
+    session_id: str | None = None
+    message: str = Field(min_length=1)
+
+
+class PendingActionResponse(BaseModel):
+    tool: str
+    action: str
+    target: str
+    description: str
+
+
+class ChatResponse(BaseModel):
+    session_id: str
+    run_id: str
+    intent: str | None = None
+    status: str
+    reply: str
+    requires_confirmation: bool = False
+    approval_status: str | None = None
+    pending_actions: list[PendingActionResponse] = Field(default_factory=list)
+
+
+class RunConfirmationRequest(BaseModel):
+    approved: bool
+
+
+class RunStepResponse(BaseModel):
+    step_key: str
+    step_name: str
+    status: str
+    input_summary: str | None = None
+    output_summary: str | None = None
+    updated_at: str
+
+
+class RunDetailResponse(ChatResponse):
+    created_at: str
+    updated_at: str
+    steps: list[RunStepResponse] = Field(default_factory=list)

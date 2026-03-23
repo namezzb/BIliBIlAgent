@@ -1,0 +1,520 @@
+[
+  {
+    "id": "agent-orchestration",
+    "category": "platform",
+    "name": "构建统一 Agent 编排核心",
+    "description": "系统以统一聊天入口接收请求，内部只保留默认 Agent 模式，根据任务类型决定是直接回答、检索知识还是调用工具，支撑后续从问答型 Agent 扩展到可执行型 Agent。",
+    "agent_mode": [
+      "agent"
+    ],
+    "memory_layers": [
+      "session",
+      "runtime"
+    ],
+    "tool_dependencies": [
+      "knowledge_retrieval",
+      "bilibili_import",
+      "bilibili_retry"
+    ],
+    "confirmation_required": true,
+    "steps": [
+      "定义统一的聊天入口和结构化响应协议",
+      "根据用户输入识别当前请求是直接回答、知识检索还是工具执行",
+      "将工具执行请求组织为结构化任务，记录目标、步骤和工具列表",
+      "在需要副作用工具时先展示待执行内容而不是直接执行",
+      "在确认后按任务顺序执行并输出结果摘要"
+    ],
+    "acceptance_criteria": [
+      "同一个聊天入口可以处理普通问答、知识检索和导入类任务",
+      "系统可以明确区分无需确认的内部检索和需要确认的外部执行",
+      "任务结果和执行结果都带有可追踪的运行 ID"
+    ],
+    "dependencies": [],
+    "passes": true,
+    "priority": "P0",
+    "notes": "首版只支持单一 `agent` 模式，不再区分 chat、plan、execute。"
+  },
+  {
+    "id": "chat-routing",
+    "category": "platform",
+    "name": "实现聊天请求路由与意图分类",
+    "description": "系统需要先判断输入是普通闲聊、收藏夹知识问答、单视频问答、导入请求还是重试请求，再进入对应的 Agent 流程。",
+    "agent_mode": [
+      "agent"
+    ],
+    "memory_layers": [
+      "session",
+      "runtime"
+    ],
+    "tool_dependencies": [],
+    "confirmation_required": false,
+    "steps": [
+      "识别用户输入中的任务意图和作用范围",
+      "区分无副作用任务与有副作用任务",
+      "为知识类问题补充检索上下文",
+      "为导入或重试类问题生成待执行任务",
+      "为后续新增工具保留统一路由扩展点"
+    ],
+    "acceptance_criteria": [
+      "普通聊天不会被误判为导入执行",
+      "收藏夹相关问题会进入知识检索链路",
+      "导入和重试类请求会被路由到工具执行链路"
+    ],
+    "dependencies": [
+      "agent-orchestration"
+    ],
+    "passes": false,
+    "priority": "P0"
+  },
+  {
+    "id": "session-memory-management",
+    "category": "memory",
+    "name": "维护短期会话记忆",
+    "description": "系统需要保存单个会话内的消息、最近摘要、上下文引用和最近检索结果，保证多轮对话连续性。",
+    "agent_mode": [
+      "agent"
+    ],
+    "memory_layers": [
+      "session"
+    ],
+    "tool_dependencies": [],
+    "confirmation_required": false,
+    "steps": [
+      "为每个会话生成唯一会话 ID",
+      "保存用户消息、Agent 回复和当前会话状态信息",
+      "为较长会话生成最近摘要以压缩上下文",
+      "记录最近一次检索或任务结果，便于追问",
+      "支持读取单会话的历史消息"
+    ],
+    "acceptance_criteria": [
+      "连续提问时 Agent 能理解用户对上文的引用",
+      "不同会话之间的消息不会串用",
+      "长会话不会因为上下文膨胀而完全丢失重点"
+    ],
+    "dependencies": [
+      "agent-orchestration"
+    ],
+    "passes": false,
+    "priority": "P0",
+    "notes": "该层只服务当前会话，不承载长期用户偏好。"
+  },
+  {
+    "id": "user-memory-management",
+    "category": "memory",
+    "name": "管理长期用户记忆",
+    "description": "系统保存用户显式声明或显式确认的偏好、别名和常用范围，供未来新会话继续使用。",
+    "agent_mode": [
+      "agent"
+    ],
+    "memory_layers": [
+      "user"
+    ],
+    "tool_dependencies": [],
+    "confirmation_required": false,
+    "steps": [
+      "定义长期用户记忆的数据结构和读写接口",
+      "只接收用户显式声明或确认后的长期记忆写入",
+      "支持在新会话中读取并应用已确认的用户偏好",
+      "保留用户查看和修改长期记忆的入口",
+      "记录记忆来源和确认状态"
+    ],
+    "acceptance_criteria": [
+      "系统不会根据行为自动推断并写入长期记忆",
+      "用户偏好在新会话中可以继续生效",
+      "用户可以明确知道哪些信息被保存为长期记忆"
+    ],
+    "dependencies": [
+      "session-memory-management"
+    ],
+    "passes": false,
+    "priority": "P1",
+    "notes": "首版只记录显式偏好，不做隐式画像。"
+  },
+  {
+    "id": "knowledge-memory-index",
+    "category": "memory",
+    "name": "构建知识库记忆与检索索引",
+    "description": "导入后的收藏夹、视频、视频分页（分P）、字幕和转写文本应统一进入知识库记忆层，供后续检索问答使用。",
+    "agent_mode": [
+      "agent"
+    ],
+    "memory_layers": [
+      "knowledge"
+    ],
+    "tool_dependencies": [
+      "knowledge_retrieval"
+    ],
+    "confirmation_required": false,
+    "steps": [
+      "定义收藏夹、视频、视频分页、文本片段的统一存储结构",
+      "把字幕或 ASR 文本切片并附加来源元数据",
+      "建立本地检索索引，支持按收藏夹、视频和分页范围检索",
+      "为后续向量化检索预留状态字段和版本字段",
+      "暴露统一的知识检索输入输出接口"
+    ],
+    "acceptance_criteria": [
+      "每条知识片段都能追溯到收藏夹、视频和视频分页",
+      "检索可以按范围过滤，不会只做全库模糊搜索",
+      "后续引入向量检索时不需要推翻现有存储契约"
+    ],
+    "dependencies": [
+      "session-memory-management"
+    ],
+    "passes": false,
+    "priority": "P0"
+  },
+  {
+    "id": "runtime-memory-audit",
+    "category": "memory",
+    "name": "记录运行记忆与工具审计轨迹",
+    "description": "每一轮 Agent 运行、每一个执行步骤和每一次工具调用都要被记录，便于审计、排障和失败重试。",
+    "agent_mode": [
+      "agent"
+    ],
+    "memory_layers": [
+      "runtime"
+    ],
+    "tool_dependencies": [
+      "knowledge_retrieval",
+      "bilibili_import",
+      "bilibili_retry"
+    ],
+    "confirmation_required": false,
+    "steps": [
+      "为每次请求创建运行记录 run",
+      "按步骤记录任务、工具调用和状态变更",
+      "保存步骤级输入摘要、输出摘要和执行状态",
+      "支持查看某个 run 的完整执行轨迹",
+      "为失败重试提供运行上下文和错误位置"
+    ],
+    "acceptance_criteria": [
+      "可以定位某次任务失败在哪个步骤",
+      "系统能够回看一次执行任务和每个步骤的结果摘要",
+      "运行记忆不会和聊天历史或知识库文本混存"
+    ],
+    "dependencies": [
+      "agent-orchestration"
+    ],
+    "passes": false,
+    "priority": "P0"
+  },
+  {
+    "id": "tool-execution-confirmation",
+    "category": "platform",
+    "name": "建立工具执行确认机制",
+    "description": "对会产生副作用或依赖外部环境的工具调用，系统必须先展示完整待执行任务并等待用户整批确认后再执行。",
+    "agent_mode": [
+      "agent"
+    ],
+    "memory_layers": [
+      "runtime",
+      "session"
+    ],
+    "tool_dependencies": [
+      "bilibili_import",
+      "bilibili_retry"
+    ],
+    "confirmation_required": true,
+    "steps": [
+      "输出本轮任务目标、执行步骤和待调用工具列表",
+      "标记该运行是否需要用户确认",
+      "在确认前阻止副作用工具的实际执行",
+      "在用户确认后记录审批信息并开始执行",
+      "将审批结果写入运行记忆"
+    ],
+    "acceptance_criteria": [
+      "有副作用的工具不会在未确认时自动执行",
+      "用户可以看到本轮计划将调用哪些工具",
+      "确认动作本身可被审计和追踪"
+    ],
+    "dependencies": [
+      "runtime-memory-audit"
+    ],
+    "passes": false,
+    "priority": "P0",
+    "notes": "首版采用整批确认，不做逐步确认。"
+  },
+  {
+    "id": "fav-folder-list",
+    "category": "functional",
+    "name": "展示可导入的收藏夹列表",
+    "description": "系统读取当前用户可访问的 B 站收藏夹，并在页面中展示名称、数量和基础信息，供用户选择导入范围。",
+    "agent_mode": [
+      "agent"
+    ],
+    "memory_layers": [
+      "runtime"
+    ],
+    "tool_dependencies": [
+      "bilibili_import"
+    ],
+    "confirmation_required": true,
+    "steps": [
+      "读取用户的 B 站 Cookie 或登录态配置",
+      "调用收藏夹列表接口获取用户可访问的收藏夹",
+      "提取收藏夹标题、ID、封面、简介和视频数量",
+      "返回前端可展示的列表结构",
+      "对登录失效或请求失败给出明确错误信息"
+    ],
+    "acceptance_criteria": [
+      "用户进入导入页后可以看到自己的收藏夹列表",
+      "每个收藏夹都展示名称、数量和唯一标识",
+      "登录失效时页面会提示重新配置登录态"
+    ],
+    "dependencies": [
+      "tool-execution-confirmation"
+    ],
+    "passes": false,
+    "priority": "P0",
+    "notes": "默认采用 `bilibili-fav-ingest` skill 的 Web Cookie 方案。"
+  },
+  {
+    "id": "fav-video-selection",
+    "category": "functional",
+    "name": "勾选收藏夹中的视频进行导入",
+    "description": "用户选定收藏夹后，可以查看收藏项列表，并勾选部分或全部视频发起导入。",
+    "agent_mode": [
+      "agent"
+    ],
+    "memory_layers": [
+      "runtime"
+    ],
+    "tool_dependencies": [
+      "bilibili_import"
+    ],
+    "confirmation_required": true,
+    "steps": [
+      "拉取选中收藏夹下的收藏项列表",
+      "过滤并标记视频资源与非视频资源",
+      "支持多选、全选和取消选择",
+      "把选中的视频请求提交给导入工具",
+      "记录每个视频的导入任务状态"
+    ],
+    "acceptance_criteria": [
+      "用户可以只导入部分视频而不是整夹全部导入",
+      "非视频收藏项会被明确标记为不支持",
+      "导入请求发起后可以看到任务状态"
+    ],
+    "dependencies": [
+      "fav-folder-list"
+    ],
+    "passes": false,
+    "priority": "P0",
+    "notes": "参考 `bilibili-fav-ingest` skill"
+  },
+  {
+    "id": "bilibili-import-execution",
+    "category": "functional",
+    "name": "执行收藏夹导入并落地知识数据",
+    "description": "系统调用 B 站采集工具链，导出用户选中的收藏夹与视频数据，并将结构化元数据和文本知识写入知识库记忆层。",
+    "agent_mode": [
+      "agent"
+    ],
+    "memory_layers": [
+      "runtime",
+      "knowledge"
+    ],
+    "tool_dependencies": [
+      "bilibili_import"
+    ],
+    "confirmation_required": true,
+    "steps": [
+      "将用户勾选的视频转换为导入任务",
+      "按工具链顺序执行收藏夹导出、视频详情补全和文本提取",
+      "把视频、视频分页、字幕和状态信息写入知识库",
+      "记录导入任务和步骤级结果",
+      "输出最终导入摘要"
+    ],
+    "acceptance_criteria": [
+      "导入完成后可以查询到收藏夹、视频和视频分页元数据",
+      "导入过程中的失败项会保留失败原因而不是静默丢失",
+      "导入结果可以直接供知识检索链路使用"
+    ],
+    "dependencies": [
+      "fav-video-selection",
+      "knowledge-memory-index",
+      "runtime-memory-audit"
+    ],
+    "passes": false,
+    "priority": "P0",
+    "notes": "参考 `bilibili-fav-ingest` skill"
+  },
+  {
+    "id": "subtitle-asr-pipeline",
+    "category": "functional",
+    "name": "获取字幕文本并预留 ASR 补偿链路",
+    "description": "系统优先获取字幕文本作为知识源；无字幕或字幕拉取失败时，要显式标记为需要 ASR，避免问答链路断裂。",
+    "agent_mode": [
+      "agent"
+    ],
+    "memory_layers": [
+      "knowledge",
+      "runtime"
+    ],
+    "tool_dependencies": [
+      "bilibili_import"
+    ],
+    "confirmation_required": true,
+    "steps": [
+      "按优先级选择中文字幕或首个可用字幕",
+      "下载并清洗字幕文本",
+      "将文本与对应视频分页关联存储",
+      "对缺失字幕的视频标记 needs_asr=true",
+      "导出后续 ASR 处理所需的媒体任务信息"
+    ],
+    "acceptance_criteria": [
+      "有字幕的视频可以保存文本内容和语言信息",
+      "无字幕或字幕失败的视频不会被静默跳过",
+      "问答层可以区分字幕文本和 ASR 文本来源"
+    ],
+    "dependencies": [
+      "bilibili-import-execution"
+    ],
+    "passes": false,
+    "priority": "P0",
+    "notes": "字幕优先级默认 `zh-CN/zh-Hans`，其次任意中文。"
+  },
+  {
+    "id": "knowledge-retrieval",
+    "category": "functional",
+    "name": "实现基于知识库记忆的检索工具",
+    "description": "系统需要把用户问题转换为检索请求，并从知识库记忆中返回相关收藏夹、视频、视频分页和片段内容。",
+    "agent_mode": [
+      "agent"
+    ],
+    "memory_layers": [
+      "knowledge",
+      "runtime",
+      "session"
+    ],
+    "tool_dependencies": [
+      "knowledge_retrieval"
+    ],
+    "confirmation_required": false,
+    "steps": [
+      "将用户问题解析为检索条件和范围",
+      "按收藏夹、视频或视频分页过滤知识片段",
+      "返回命中的来源信息和片段摘要",
+      "将检索结果写入当前会话上下文",
+      "为回答阶段提供结构化来源数据"
+    ],
+    "acceptance_criteria": [
+      "收藏夹问题能够命中对应收藏夹范围的数据",
+      "单视频问题能够缩小到具体视频或视频分页",
+      "检索结果带有可溯源的来源元数据"
+    ],
+    "dependencies": [
+      "knowledge-memory-index",
+      "chat-routing"
+    ],
+    "passes": false,
+    "priority": "P0",
+    "notes": "向量检索。"
+  },
+  {
+    "id": "knowledge-grounded-qa",
+    "category": "functional",
+    "name": "支持基于收藏夹知识的问答",
+    "description": "当用户提问涉及收藏夹、视频或视频分页内容时，Agent 应基于检索结果生成带来源的回答，而不是脱离知识库直接瞎答。",
+    "agent_mode": [
+      "agent"
+    ],
+    "memory_layers": [
+      "session",
+      "knowledge",
+      "runtime"
+    ],
+    "tool_dependencies": [
+      "knowledge_retrieval"
+    ],
+    "confirmation_required": false,
+    "steps": [
+      "识别问题是否属于知识库问答",
+      "调用知识检索工具获取相关片段",
+      "结合用户问题和检索结果生成回答",
+      "在回答中引用收藏夹、视频或视频分页来源",
+      "未命中时明确告知知识库暂无相关内容"
+    ],
+    "acceptance_criteria": [
+      "用户可以询问某个收藏夹里有哪些相关视频",
+      "用户可以询问某个具体视频或视频分页讲了什么",
+      "回答至少带有视频标题、收藏夹或视频分页等来源信息"
+    ],
+    "dependencies": [
+      "knowledge-retrieval"
+    ],
+    "passes": false,
+    "priority": "P0",
+    "notes": "知识问答优先保证可溯源，不追求一次性大而全的自由发挥。"
+  },
+  {
+    "id": "general-chat-fallback",
+    "category": "functional",
+    "name": "提供通用聊天回退能力",
+    "description": "当问题与收藏夹知识无关，或当前知识库没有命中内容时，Agent 仍应给出通用聊天回复，保证统一入口可用。",
+    "agent_mode": [
+      "agent"
+    ],
+    "memory_layers": [
+      "session",
+      "user"
+    ],
+    "tool_dependencies": [],
+    "confirmation_required": false,
+    "steps": [
+      "识别当前问题是否不需要知识库或工具支持",
+      "调用通用回答能力生成回复",
+      "结合长期用户偏好调整回答风格",
+      "将回复写入当前会话"
+    ],
+    "acceptance_criteria": [
+      "用户可以直接询问日常问题并得到回答",
+      "知识库未命中不会导致整个会话失败",
+      "通用聊天仍然可以保留会话连续性"
+    ],
+    "dependencies": [
+      "chat-routing",
+      "user-memory-management"
+    ],
+    "passes": false,
+    "priority": "P1",
+    "notes": "该能力与知识问答并行存在，共享统一聊天入口。"
+  },
+  {
+    "id": "import-status-and-retry",
+    "category": "functional",
+    "name": "展示导入状态并支持失败重试",
+    "description": "导入链路需要有可见状态，并对视频详情、字幕、播放地址或文本提取失败的项目支持重试。",
+    "agent_mode": [
+      "agent"
+    ],
+    "memory_layers": [
+      "runtime",
+      "knowledge"
+    ],
+    "tool_dependencies": [
+      "bilibili_retry"
+    ],
+    "confirmation_required": true,
+    "steps": [
+      "保存每个导入任务和子步骤的状态",
+      "区分成功、处理中、失败、需 ASR 和不支持等状态",
+      "在页面展示失败原因和最近更新时间",
+      "为失败项生成重试任务并等待用户确认",
+      "重试成功后更新知识数据和运行状态"
+    ],
+    "acceptance_criteria": [
+      "用户可以看到某个视频为什么导入失败",
+      "失败项可以单独重试而不影响已成功数据",
+      "重试后系统会更新状态、时间戳和结果摘要"
+    ],
+    "dependencies": [
+      "bilibili-import-execution",
+      "runtime-memory-audit",
+      "tool-execution-confirmation"
+    ],
+    "passes": false,
+    "priority": "P1",
+    "notes": "建议复用 `retry_failed_items.py` 的失败类型和状态定义。"
+  }
+]

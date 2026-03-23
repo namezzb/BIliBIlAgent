@@ -1,0 +1,55 @@
+2026-03-23 16:30 CST
+Current goal: Initialize BIliBIlAgent with a runnable FastAPI backend and project tracking files.
+Completed:
+- Confirmed the repository currently contains only a sample Python entrypoint and Poetry metadata.
+- Chosen architecture: FastAPI single-service backend, with `init.sh` starting only the backend dev server.
+- Reserved Bilibili favorite ingestion to use the existing `bilibili-fav-ingest` skill workflow in later implementation stages.
+In progress:
+- Add backend bootstrapping files, project progress log, and structured feature checklist.
+Blockers:
+- None.
+Next step:
+- Run dependency installation and verify `bash init.sh` starts the backend and serves `/health`.
+
+2026-03-23 16:42 CST
+Current goal: Close out project initialization and capture the verified startup state.
+Completed:
+- Added FastAPI backend skeleton with `/` and `/health` endpoints.
+- Added `feature_list.json` with detailed Bilibili import and QA requirements.
+- Added executable `init.sh` that installs dependencies and starts the development server.
+- Updated Poetry metadata and lockfile for FastAPI/Uvicorn.
+- Verified `bash init.sh` starts the backend and `GET /health` returns `{\"status\":\"ok\",\"service\":\"bilibilagent-backend\"}`.
+In progress:
+- None.
+Blockers:
+- None.
+Next step:
+- Start implementing Bilibili favorite import APIs and persistent storage according to `feature_list.json`.
+
+2026-03-23 18:35 CST
+Current goal: Implement the first unfinished feature `agent-orchestration` with a runnable orchestration stack.
+Completed:
+- Added a `FastAPI + LangGraph + SQLite` orchestration baseline with persistent session, run, and run-step storage.
+- Implemented `POST /api/chat`, `POST /api/runs/{run_id}/confirm`, and `GET /api/runs/{run_id}`.
+- Wired a minimal LangGraph state machine with intent classification, approval interrupt, placeholder tool execution, and run finalization.
+- Added an OpenAI-compatible LLM abstraction for general chat and safe fallback text when no model is configured.
+- Added API tests that cover general chat, confirmation flow, and run detail retrieval.
+In progress:
+- Install new dependencies and verify the implementation with automated tests.
+Blockers:
+- None.
+Next step:
+- Run `poetry install` and `pytest` to verify the new orchestration layer end to end.
+
+2026-03-23 18:48 CST
+Current goal: Verify the first orchestration feature and sync project state.
+Completed:
+- Rebuilt `poetry.lock` and installed the new runtime dependencies.
+- Verified the orchestration APIs with `poetry run pytest`.
+- Marked `agent-orchestration` as passed in `feature_list.json`.
+In progress:
+- None.
+Blockers:
+- None.
+Next step:
+- Implement `chat-routing` and expand the placeholder nodes into real knowledge and import tools.
