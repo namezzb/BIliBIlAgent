@@ -40,4 +40,14 @@ class RunStepResponse(BaseModel):
 class RunDetailResponse(ChatResponse):
     created_at: str
     updated_at: str
+    event_count: int
     steps: list[RunStepResponse] = Field(default_factory=list)
+
+
+class RunEventResponse(BaseModel):
+    event_id: str
+    run_id: str
+    sequence: int
+    type: str
+    timestamp: str
+    payload: dict[str, object]

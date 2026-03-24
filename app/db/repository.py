@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
+from app.agent.types import RunEvent, RunEventType
 from app.db.schema import SCHEMA_STATEMENTS
 
 
@@ -226,3 +227,77 @@ class SQLiteRepository:
                 (run_id,),
             ).fetchall()
         return [dict(row) for row in rows]
+
+    def append_run_event(
+        self,
+        run_id: str,
+        event_type: RunEventType,
+        payload: dict[str, Any],
+    ) -> RunEvent:
+        event_id = str(uuid4())
+        timestamp = utc_now()
+        payload_json = json.dumps(payload, ensure_ascii=False)
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT COALESCE(MAX(sequence), 0) + 1 AS next_sequence FROM run_events WHERE run_id = ?",
+                (run_id,),
+            ).fetchone()
+            sequence = int(row["next_sequence"])
+            connection.execute(
+                """
+                INSERT INTO run_events (
+                    event_id,
+                    run_id,
+                    sequence,
+                    event_type,
+                    payload_json,
+                    created_at
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (event_id, run_id, sequence, event_type, payload_json, timestamp),
+            )
+            connection.commit()
+        return {
+            "event_id": event_id,
+            "run_id": run_id,
+            "sequence": sequence,
+            "type": event_type,
+            "timestamp": timestamp,
+            "payload": payload,
+        }
+
+    def get_run_events(
+        self,
+        run_id: str,
+        *,
+        after_sequence: int = 0,
+    ) -> list[RunEvent]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT event_id, run_id, sequence, event_type, payload_json, created_at
+                FROM run_events
+                WHERE run_id = ? AND sequence > ?
+                ORDER BY sequence ASC
+                """,
+                (run_id, after_sequence),
+            ).fetchall()
+        return [
+            {
+                "event_id": row["event_id"],
+                "run_id": row["run_id"],
+                "sequence": row["sequence"],
+                "type": row["event_type"],
+                "timestamp": row["created_at"],
+                "payload": json.loads(row["payload_json"]),
+            }
+            for row in rows
+        ]
+
+    def get_run_event_count(self, run_id: str) -> int:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT COUNT(*) AS total FROM run_events WHERE run_id = ?",
+                (run_id,),
+            ).fetchone()
+        return int(row["total"]) if row is not None else 0

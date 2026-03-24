@@ -5,6 +5,7 @@ from langgraph.checkpoint.sqlite import SqliteSaver
 from langgraph.graph import END, START, StateGraph
 from langgraph.types import Command, interrupt
 
+from app.agent.events import aggregate_chat_response
 from app.agent.types import AgentState, IntentType, PendingAction
 from app.db.repository import SQLiteRepository
 from app.services.llm import OpenAICompatibleLLM
@@ -34,7 +35,15 @@ class AgentOrchestrator:
         message: str,
         messages: list[dict[str, str]],
     ) -> dict[str, Any]:
-        result = self.graph.invoke(
+        self._emit_event(
+            run_id,
+            "run_started",
+            {
+                "session_id": session_id,
+                "message": message,
+            },
+        )
+        self.graph.invoke(
             {
                 "session_id": session_id,
                 "run_id": run_id,
@@ -46,14 +55,16 @@ class AgentOrchestrator:
             },
             config={"configurable": {"thread_id": run_id}},
         )
-        return self._normalize_result(result)
+        return self._build_sync_response(run_id, session_id)
 
     def resume_run(self, run_id: str, approved: bool) -> dict[str, Any]:
-        result = self.graph.invoke(
+        self.graph.invoke(
             Command(resume={"approved": approved}),
             config={"configurable": {"thread_id": run_id}},
         )
-        return self._normalize_result(result)
+        run = self.repository.get_run(run_id)
+        session_id = run["session_id"] if run is not None else ""
+        return self._build_sync_response(run_id, session_id)
 
     def _build_graph(self):
         builder = StateGraph(AgentState)
@@ -88,33 +99,13 @@ class AgentOrchestrator:
 
         return builder.compile(checkpointer=self.checkpointer)
 
-    def _normalize_result(self, result: dict[str, Any]) -> dict[str, Any]:
-        interrupts = result.get("__interrupt__", [])
-        requires_confirmation = bool(interrupts)
-        status = result.get("status", "completed")
-        if requires_confirmation:
-            status = "awaiting_confirmation"
+    def _build_sync_response(self, run_id: str, session_id: str) -> dict[str, Any]:
+        aggregated = aggregate_chat_response(run_id, self.repository.get_run_events(run_id))
+        aggregated["session_id"] = session_id
+        return aggregated
 
-        interrupt_payload = None
-        if interrupts:
-            first_interrupt = interrupts[0]
-            interrupt_payload = getattr(first_interrupt, "value", first_interrupt)
-
-        pending_actions = result.get("pending_actions", [])
-        if interrupt_payload and not pending_actions:
-            pending_actions = interrupt_payload.get("pending_actions", [])
-
-        return {
-            "session_id": result.get("session_id"),
-            "run_id": result.get("run_id"),
-            "intent": result.get("intent"),
-            "status": status,
-            "reply": result.get("response", ""),
-            "requires_confirmation": requires_confirmation,
-            "approval_status": result.get("approval_status"),
-            "pending_actions": pending_actions,
-            "confirmation_payload": interrupt_payload,
-        }
+    def _emit_event(self, run_id: str, event_type: str, payload: dict[str, Any]) -> None:
+        self.repository.append_run_event(run_id, event_type, payload)
 
     def _route_after_plan(self, state: AgentState) -> str:
         if state.get("requires_confirmation"):
@@ -135,6 +126,11 @@ class AgentOrchestrator:
             input_summary="load session history",
             output_summary=f"loaded {len(state.get('messages', []))} messages",
         )
+        self._emit_event(
+            state["run_id"],
+            "context_loaded",
+            {"message_count": len(state.get("messages", []))},
+        )
         return {}
 
     def _classify_intent(self, state: AgentState) -> dict[str, Any]:
@@ -146,6 +142,14 @@ class AgentOrchestrator:
             "completed",
             input_summary=state["current_message"],
             output_summary=intent,
+        )
+        self._emit_event(
+            state["run_id"],
+            "intent_classified",
+            {
+                "intent": intent,
+                "message": state["current_message"],
+            },
         )
         return {"intent": intent}
 
@@ -164,6 +168,15 @@ class AgentOrchestrator:
                 "completed",
                 input_summary=intent,
                 output_summary="prepared execution plan",
+            )
+            self._emit_event(
+                state["run_id"],
+                "response_prepared",
+                {
+                    "intent": intent,
+                    "reply": response,
+                    "pending_actions": pending_actions,
+                },
             )
             return {
                 "pending_actions": pending_actions,
@@ -188,6 +201,15 @@ class AgentOrchestrator:
             input_summary=intent,
             output_summary="generated direct response",
         )
+        self._emit_event(
+            state["run_id"],
+            "response_prepared",
+            {
+                "intent": intent,
+                "reply": response,
+                "pending_actions": [],
+            },
+        )
         return {
             "requires_confirmation": False,
             "status": "completed",
@@ -208,6 +230,15 @@ class AgentOrchestrator:
             input_summary="user approval required",
             output_summary="waiting for confirmation",
         )
+        self._emit_event(
+            state["run_id"],
+            "confirmation_required",
+            {
+                "question": payload["question"],
+                "pending_actions": payload["pending_actions"],
+                "reply": state.get("response", ""),
+            },
+        )
         decision = interrupt(payload)
         approved = self._is_approved(decision)
         approval_status = "approved" if approved else "rejected"
@@ -218,6 +249,18 @@ class AgentOrchestrator:
             "completed",
             input_summary="received confirmation decision",
             output_summary=approval_status,
+        )
+        self._emit_event(
+            state["run_id"],
+            "confirmation_resolved",
+            {
+                "approved": approved,
+                "reply": (
+                    state.get("response", "")
+                    if approved
+                    else "Execution was cancelled. No side-effectful tool was run."
+                ),
+            },
         )
         return {
             "approval_status": approval_status,
@@ -234,6 +277,11 @@ class AgentOrchestrator:
             "Execution was approved. The tool pipeline placeholder ran successfully, "
             "but real Bilibili import tools are not wired in yet."
         )
+        self._emit_event(
+            state["run_id"],
+            "tool_execution_started",
+            {"tool": "bilibili_import", "action": "prepare_import_plan"},
+        )
         self.repository.upsert_run_step(
             state["run_id"],
             "execute_placeholder",
@@ -241,6 +289,15 @@ class AgentOrchestrator:
             "completed",
             input_summary="approved tool request",
             output_summary="placeholder execution finished",
+        )
+        self._emit_event(
+            state["run_id"],
+            "tool_execution_finished",
+            {
+                "tool": "bilibili_import",
+                "action": "prepare_import_plan",
+                "reply": response,
+            },
         )
         return {"status": "completed", "response": response}
 
@@ -253,6 +310,15 @@ class AgentOrchestrator:
             "completed",
             input_summary="finalize run state",
             output_summary=status,
+        )
+        event_type = "run_failed" if status == "failed" else "run_completed"
+        self._emit_event(
+            state["run_id"],
+            event_type,
+            {
+                "status": status,
+                "reply": state.get("response", ""),
+            },
         )
         return {"status": status}
 

@@ -53,3 +53,18 @@ Blockers:
 - None.
 Next step:
 - Implement `chat-routing` and expand the placeholder nodes into real knowledge and import tools.
+
+2026-03-24 10:20 CST
+Current goal: Refactor orchestration to support event-driven execution and SSE subscriptions without breaking sync APIs.
+Completed:
+- Added `run_events` persistence with ordered event replay for each run.
+- Refactored the LangGraph orchestrator to emit run events for context load, intent classification, response preparation, confirmation, tool execution, and completion.
+- Kept `/api/chat` and `/api/runs/{run_id}/confirm` compatible by aggregating stored events into the existing sync response shape.
+- Added `GET /api/runs/{run_id}/events` SSE streaming with replay support and optional `follow=false` for replay-only consumers/tests.
+- Extended tests to cover event replay, confirmation-required runs, and SSE-compatible completed runs.
+In progress:
+- None.
+Blockers:
+- None.
+Next step:
+- Use the event layer to implement real `chat-routing` branches and replace placeholders with knowledge retrieval and Bilibili import events.

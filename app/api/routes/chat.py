@@ -1,16 +1,20 @@
+import asyncio
 from uuid import uuid4
 
-from fastapi import APIRouter, HTTPException, Request, status
+from fastapi import APIRouter, HTTPException, Query, Request, status
+from fastapi.responses import StreamingResponse
 
 from app.api.schemas import (
     ChatRequest,
     ChatResponse,
+    RunEventResponse,
     RunConfirmationRequest,
     RunDetailResponse,
 )
 
 
 router = APIRouter(prefix="/api", tags=["agent"])
+TERMINAL_STATUSES = {"completed", "cancelled", "failed"}
 
 
 @router.post("/chat", response_model=ChatResponse)
@@ -101,5 +105,58 @@ def get_run(run_id: str, request: Request) -> RunDetailResponse:
         pending_actions=existing_run["pending_actions"],
         created_at=existing_run["created_at"],
         updated_at=existing_run["updated_at"],
+        event_count=repository.get_run_event_count(run_id),
         steps=repository.get_run_steps(run_id),
+    )
+
+
+@router.get("/runs/{run_id}/events")
+async def stream_run_events(
+    run_id: str,
+    request: Request,
+    follow: bool = Query(default=True),
+) -> StreamingResponse:
+    repository = request.app.state.repository
+    existing_run = repository.get_run(run_id)
+    if existing_run is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Run not found.")
+
+    async def event_stream():
+        last_sequence = 0
+        idle_loops = 0
+        first_pass_completed = False
+
+        while True:
+            if await request.is_disconnected():
+                break
+
+            events = repository.get_run_events(run_id, after_sequence=last_sequence)
+            for event in events:
+                last_sequence = event["sequence"]
+                payload = RunEventResponse(**event).model_dump_json()
+                yield f"id: {event['sequence']}\nevent: run_event\ndata: {payload}\n\n"
+                idle_loops = 0
+
+            current_run = repository.get_run(run_id)
+            if current_run is None:
+                break
+            if current_run["status"] in TERMINAL_STATUSES:
+                break
+            if not follow and first_pass_completed:
+                break
+
+            first_pass_completed = True
+            idle_loops += 1
+            if idle_loops >= 20:
+                yield ": keep-alive\n\n"
+                idle_loops = 0
+            await asyncio.sleep(0.25)
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+        },
     )
