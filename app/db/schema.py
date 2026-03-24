@@ -2,6 +2,8 @@ SCHEMA_STATEMENTS = [
     """
     CREATE TABLE IF NOT EXISTS sessions (
         session_id TEXT PRIMARY KEY,
+        summary_text TEXT,
+        recent_context_json TEXT,
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL
     )

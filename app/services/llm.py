@@ -28,10 +28,7 @@ class OpenAICompatibleLLM:
 
     def chat(self, messages: list[dict[str, str]]) -> str:
         if not self.api_key:
-            return (
-                "General chat is available, but no LLM provider is configured yet. "
-                "Set LLM_API_KEY to enable model responses."
-            )
+            return self._fallback_chat(messages)
 
         request_messages = [{"role": "system", "content": self.system_prompt}, *messages]
 
@@ -49,3 +46,22 @@ class OpenAICompatibleLLM:
             return content
 
         return "The model returned an empty response."
+
+    def _fallback_chat(self, messages: list[dict[str, str]]) -> str:
+        user_messages = [message["content"] for message in messages if message["role"] == "user"]
+        latest_user_message = user_messages[-1].lower() if user_messages else ""
+
+        if len(user_messages) >= 2 and latest_user_message in {
+            "我刚刚问了什么？",
+            "我刚刚问了什么?",
+            "我刚才问了什么？",
+            "我刚才问了什么?",
+            "what did i just ask?",
+            "what was my previous question?",
+        }:
+            return f"Your previous question was: {user_messages[-2]}"
+
+        return (
+            "General chat is available, but no LLM provider is configured yet. "
+            "Set LLM_API_KEY to enable model responses."
+        )

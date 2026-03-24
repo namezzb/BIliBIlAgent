@@ -7,6 +7,7 @@ from app.api.routes.chat import router as chat_router
 from app.core.config import Settings, get_settings
 from app.db.repository import SQLiteRepository
 from app.services.llm import OpenAICompatibleLLM
+from app.services.session_memory import SessionMemoryManager
 
 
 @asynccontextmanager
@@ -25,9 +26,11 @@ async def lifespan(app: FastAPI):
         llm=llm,
         checkpoint_db_path=settings.checkpoint_db_path,
     )
+    session_memory = SessionMemoryManager(repository)
 
     app.state.repository = repository
     app.state.orchestrator = orchestrator
+    app.state.session_memory = session_memory
 
     try:
         yield

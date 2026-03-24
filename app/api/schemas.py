@@ -52,3 +52,20 @@ class RunEventResponse(BaseModel):
     type: str
     timestamp: str
     payload: dict[str, object]
+
+
+class SessionMessageResponse(BaseModel):
+    message_id: str
+    run_id: str | None = None
+    role: str
+    content: str
+    created_at: str
+
+
+class SessionDetailResponse(BaseModel):
+    session_id: str
+    summary_text: str | None = None
+    recent_context: dict[str, object] = Field(default_factory=dict)
+    created_at: str
+    updated_at: str
+    messages: list[SessionMessageResponse] = Field(default_factory=list)

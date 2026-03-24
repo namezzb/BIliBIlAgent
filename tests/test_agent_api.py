@@ -146,3 +146,55 @@ def test_favorite_knowledge_query_route_is_exposed(tmp_path: Path) -> None:
         assert body["intent"] == "knowledge_query"
         assert body["route"] == "favorite_knowledge_query"
         assert body["status"] == "completed"
+
+
+def test_session_detail_returns_history_and_recent_context(tmp_path: Path) -> None:
+    with build_client(tmp_path) as client:
+        first = client.post("/api/chat", json={"message": "hello"})
+        session_id = first.json()["session_id"]
+        client.post("/api/chat", json={"session_id": session_id, "message": "我刚刚问了什么？"})
+
+        detail = client.get(f"/api/sessions/{session_id}")
+
+        assert detail.status_code == 200
+        body = detail.json()
+        assert body["session_id"] == session_id
+        assert len(body["messages"]) == 4
+        assert body["recent_context"]["last_run_id"]
+        assert body["recent_context"]["last_user_message"] == "我刚刚问了什么？"
+
+
+def test_session_follow_up_uses_previous_message_when_no_llm_is_configured(tmp_path: Path) -> None:
+    with build_client(tmp_path) as client:
+        first = client.post("/api/chat", json={"message": "我最喜欢的水果是什么？"})
+        session_id = first.json()["session_id"]
+
+        second = client.post(
+            "/api/chat",
+            json={"session_id": session_id, "message": "我刚刚问了什么？"},
+        )
+
+        assert second.status_code == 200
+        body = second.json()
+        assert "我最喜欢的水果是什么？" in body["reply"]
+
+
+def test_long_session_generates_summary_and_sessions_are_isolated(tmp_path: Path) -> None:
+    with build_client(tmp_path) as client:
+        first = client.post("/api/chat", json={"message": "第一句"})
+        session_a = first.json()["session_id"]
+        session_b = client.post("/api/chat", json={"message": "另一条会话"}).json()["session_id"]
+
+        for content in ["第二句", "第三句", "第四句", "第五句"]:
+            client.post("/api/chat", json={"session_id": session_a, "message": content})
+
+        detail_a = client.get(f"/api/sessions/{session_a}")
+        detail_b = client.get(f"/api/sessions/{session_b}")
+
+        assert detail_a.status_code == 200
+        assert detail_b.status_code == 200
+        body_a = detail_a.json()
+        body_b = detail_b.json()
+        assert body_a["summary_text"]
+        assert len(body_a["messages"]) > len(body_b["messages"])
+        assert all(message["content"] != "另一条会话" for message in body_a["messages"])

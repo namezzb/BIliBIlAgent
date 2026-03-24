@@ -34,6 +34,8 @@ class AgentOrchestrator:
         run_id: str,
         message: str,
         messages: list[dict[str, str]],
+        session_summary: str | None = None,
+        recent_context: dict[str, object] | None = None,
     ) -> dict[str, Any]:
         self._emit_event(
             run_id,
@@ -49,6 +51,8 @@ class AgentOrchestrator:
                 "run_id": run_id,
                 "current_message": message,
                 "messages": messages,
+                "session_summary": session_summary,
+                "recent_context": recent_context or {},
                 "status": "running",
                 "requires_confirmation": False,
                 "pending_actions": [],
@@ -129,7 +133,11 @@ class AgentOrchestrator:
         self._emit_event(
             state["run_id"],
             "context_loaded",
-            {"message_count": len(state.get("messages", []))},
+            {
+                "message_count": len(state.get("messages", [])),
+                "summary_present": bool(state.get("session_summary")),
+                "recent_context_available": bool(state.get("recent_context")),
+            },
         )
         return {}
 
@@ -158,7 +166,6 @@ class AgentOrchestrator:
     def _plan_or_answer(self, state: AgentState) -> dict[str, Any]:
         intent = state["intent"]
         route = state["route"]
-        #工具 "import_request", "retry_request"
         if route in {"import_request", "retry_request"}:
             pending_actions = self._build_pending_actions(route, state["current_message"])
             response = (
@@ -190,14 +197,11 @@ class AgentOrchestrator:
                 "response": response,
             }
 
-        # favorite_knowledge_query
         if route == "favorite_knowledge_query":
             response = (
                 "Favorite-folder knowledge query is recognized, but the retrieval chain "
                 "is not connected yet."
             )
-
-        # video_knowledge_query
         elif route == "video_knowledge_query":
             response = (
                 "Single-video knowledge query is recognized, but the retrieval chain "
@@ -216,14 +220,14 @@ class AgentOrchestrator:
         )
         self._emit_event(
             state["run_id"],
-                "response_prepared",
-                {
-                    "intent": intent,
-                    "route": route,
-                    "reply": response,
-                    "pending_actions": [],
-                },
-            )
+            "response_prepared",
+            {
+                "intent": intent,
+                "route": route,
+                "reply": response,
+                "pending_actions": [],
+            },
+        )
         return {
             "requires_confirmation": False,
             "status": "completed",
@@ -245,7 +249,6 @@ class AgentOrchestrator:
             output_summary="waiting for confirmation",
         )
 
-        #需要批准前
         self._emit_event(
             state["run_id"],
             "confirmation_required",

@@ -42,6 +42,8 @@ class AgentState(TypedDict, total=False):
     run_id: str
     current_message: str
     messages: list[dict[str, str]]
+    session_summary: str | None
+    recent_context: dict[str, object]
     intent: IntentType
     route: RouteType
     status: RunStatus

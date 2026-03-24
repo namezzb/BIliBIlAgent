@@ -68,3 +68,34 @@ Blockers:
 - None.
 Next step:
 - Use the event layer to implement real `chat-routing` branches and replace placeholders with knowledge retrieval and Bilibili import events.
+
+2026-03-24 11:05 CST
+Current goal: Implement `chat-routing` as the next unfinished P0 feature in `feature_list.json`.
+Completed:
+- Upgraded routing from coarse `intent`-only classification to five explicit routes: `general_chat`, `favorite_knowledge_query`, `video_knowledge_query`, `import_request`, and `retry_request`.
+- Preserved `intent` compatibility while adding `route` to sync API responses, run detail responses, persisted run state, and SSE event payloads.
+- Split placeholder behavior by route: favorite-folder knowledge queries, single-video knowledge queries, import requests, and retry requests now produce distinct branches and tool plans.
+- Added route-aware tests covering sync responses, detail responses, SSE replay, import confirmation, retry routing, and favorite-folder knowledge routing.
+- Verified the implementation with `poetry run pytest` (`7 passed`).
+In progress:
+- None.
+Blockers:
+- None.
+Next step:
+- Implement `session-memory-management` and start storing session summaries, recent retrieval context, and route-aware conversational context.
+
+2026-03-24 12:05 CST
+Current goal: Implement `session-memory-management` as the next unfinished P0 feature in `feature_list.json`.
+Completed:
+- Extended the `sessions` store with `summary_text` and `recent_context` for short-term session memory.
+- Added a `SessionMemoryManager` that builds prompt context from `summary + recent messages` and refreshes session state after each chat/confirm turn.
+- Added `GET /api/sessions/{session_id}` to inspect one session's history, summary, and recent context.
+- Updated the no-LLM fallback chat path to answer simple \"what did I just ask\" follow-ups using session history.
+- Added tests covering session detail retrieval, follow-up continuity, summary generation for longer sessions, and cross-session isolation.
+- Verified the implementation with `poetry run pytest` (`10 passed`).
+In progress:
+- None.
+Blockers:
+- None.
+Next step:
+- Implement `knowledge-memory-index` or `runtime-memory-audit`, depending on whether we want to prioritize retrieval-ready storage or deeper execution auditing next.

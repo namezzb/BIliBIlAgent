@@ -21,8 +21,17 @@ class SQLiteRepository:
         with self._connect() as connection:
             for statement in SCHEMA_STATEMENTS:
                 connection.execute(statement)
+            self._ensure_sessions_memory_columns(connection)
             self._ensure_runs_route_column(connection)
             connection.commit()
+
+    def _ensure_sessions_memory_columns(self, connection: sqlite3.Connection) -> None:
+        rows = connection.execute("PRAGMA table_info(sessions)").fetchall()
+        columns = {row["name"] for row in rows}
+        if "summary_text" not in columns:
+            connection.execute("ALTER TABLE sessions ADD COLUMN summary_text TEXT")
+        if "recent_context_json" not in columns:
+            connection.execute("ALTER TABLE sessions ADD COLUMN recent_context_json TEXT")
 
     def _ensure_runs_route_column(self, connection: sqlite3.Connection) -> None:
         rows = connection.execute("PRAGMA table_info(runs)").fetchall()
@@ -62,6 +71,46 @@ class SQLiteRepository:
                 (utc_now(), session_id),
             )
             connection.commit()
+
+    def update_session_memory(
+        self,
+        session_id: str,
+        *,
+        summary_text: str | None,
+        recent_context: dict[str, Any],
+    ) -> None:
+        with self._connect() as connection:
+            connection.execute(
+                """
+                UPDATE sessions
+                SET summary_text = ?, recent_context_json = ?, updated_at = ?
+                WHERE session_id = ?
+                """,
+                (
+                    summary_text,
+                    json.dumps(recent_context, ensure_ascii=False),
+                    utc_now(),
+                    session_id,
+                ),
+            )
+            connection.commit()
+
+    def get_session(self, session_id: str) -> dict[str, Any] | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT session_id, summary_text, recent_context_json, created_at, updated_at
+                FROM sessions
+                WHERE session_id = ?
+                """,
+                (session_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        result = dict(row)
+        recent_context_json = result.pop("recent_context_json")
+        result["recent_context"] = json.loads(recent_context_json) if recent_context_json else {}
+        return result
 
     def add_message(
         self,

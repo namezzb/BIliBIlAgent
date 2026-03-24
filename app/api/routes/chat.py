@@ -10,6 +10,7 @@ from app.api.schemas import (
     RunEventResponse,
     RunConfirmationRequest,
     RunDetailResponse,
+    SessionDetailResponse,
 )
 
 
@@ -21,6 +22,7 @@ TERMINAL_STATUSES = {"completed", "cancelled", "failed"}
 def chat(request: Request, payload: ChatRequest) -> ChatResponse:
     repository = request.app.state.repository
     orchestrator = request.app.state.orchestrator
+    session_memory = request.app.state.session_memory
 
     session_id = payload.session_id or str(uuid4())
     if repository.session_exists(session_id):
@@ -31,16 +33,15 @@ def chat(request: Request, payload: ChatRequest) -> ChatResponse:
     run_id = str(uuid4())
     repository.create_run(run_id, session_id, status="running")
     repository.add_message(session_id, "user", payload.message, run_id=run_id)
-    messages = [
-        {"role": item["role"], "content": item["content"]}
-        for item in repository.get_messages(session_id)
-    ]
+    session_context = session_memory.load_session_context(session_id)
 
     result = orchestrator.invoke_chat(
         session_id=session_id,
         run_id=run_id,
         message=payload.message,
-        messages=messages,
+        messages=session_context["messages"],
+        session_summary=session_context["session_summary"],
+        recent_context=session_context["recent_context"],
     )
     repository.update_run(
         run_id,
@@ -53,6 +54,15 @@ def chat(request: Request, payload: ChatRequest) -> ChatResponse:
         pending_actions=result["pending_actions"],
     )
     repository.add_message(session_id, "assistant", result["reply"], run_id=run_id)
+    session_memory.refresh_session_memory(
+        session_id,
+        run_id=run_id,
+        intent=result["intent"],
+        route=result["route"],
+        status=result["status"],
+        reply=result["reply"],
+        pending_actions=result["pending_actions"],
+    )
     return ChatResponse(**result)
 
 
@@ -64,6 +74,7 @@ def confirm_run(
 ) -> ChatResponse:
     repository = request.app.state.repository
     orchestrator = request.app.state.orchestrator
+    session_memory = request.app.state.session_memory
 
     existing_run = repository.get_run(run_id)
     if existing_run is None:
@@ -86,6 +97,15 @@ def confirm_run(
         pending_actions=result["pending_actions"],
     )
     repository.add_message(existing_run["session_id"], "assistant", result["reply"], run_id=run_id)
+    session_memory.refresh_session_memory(
+        existing_run["session_id"],
+        run_id=run_id,
+        intent=result["intent"],
+        route=result["route"],
+        status=result["status"],
+        reply=result["reply"],
+        pending_actions=result["pending_actions"],
+    )
     return ChatResponse(**result)
 
 
@@ -111,6 +131,15 @@ def get_run(run_id: str, request: Request) -> RunDetailResponse:
         event_count=repository.get_run_event_count(run_id),
         steps=repository.get_run_steps(run_id),
     )
+
+
+@router.get("/sessions/{session_id}", response_model=SessionDetailResponse)
+def get_session(session_id: str, request: Request) -> SessionDetailResponse:
+    session_memory = request.app.state.session_memory
+    session_detail = session_memory.get_session_detail(session_id)
+    if session_detail is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Session not found.")
+    return SessionDetailResponse(**session_detail)
 
 
 @router.get("/runs/{run_id}/events")
