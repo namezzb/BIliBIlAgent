@@ -2,7 +2,20 @@ from typing import Literal, TypedDict
 
 
 IntentType = Literal["general_chat", "knowledge_query", "tool_request"]
+
+#Routing
+RouteType = Literal[
+    "general_chat",
+    "favorite_knowledge_query",
+    "video_knowledge_query",
+    "import_request",
+    "retry_request",
+]
+
+
 RunStatus = Literal["running", "completed", "awaiting_confirmation", "cancelled", "failed"]
+
+
 RunEventType = Literal[
     "run_started",
     "context_loaded",
@@ -30,6 +43,7 @@ class AgentState(TypedDict, total=False):
     current_message: str
     messages: list[dict[str, str]]
     intent: IntentType
+    route: RouteType
     status: RunStatus
     requires_confirmation: bool
     approval_status: Literal["approved", "rejected"] | None

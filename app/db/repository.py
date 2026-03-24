@@ -21,7 +21,14 @@ class SQLiteRepository:
         with self._connect() as connection:
             for statement in SCHEMA_STATEMENTS:
                 connection.execute(statement)
+            self._ensure_runs_route_column(connection)
             connection.commit()
+
+    def _ensure_runs_route_column(self, connection: sqlite3.Connection) -> None:
+        rows = connection.execute("PRAGMA table_info(runs)").fetchall()
+        columns = {row["name"] for row in rows}
+        if "route" not in columns:
+            connection.execute("ALTER TABLE runs ADD COLUMN route TEXT")
 
     def _connect(self) -> sqlite3.Connection:
         connection = sqlite3.connect(self.db_path)
@@ -115,6 +122,7 @@ class SQLiteRepository:
         run_id: str,
         *,
         intent: str | None = None,
+        route: str | None = None,
         status: str | None = None,
         requires_confirmation: bool | None = None,
         approval_status: str | None = None,
@@ -127,6 +135,9 @@ class SQLiteRepository:
         if intent is not None:
             assignments.append("intent = ?")
             values.append(intent)
+        if route is not None:
+            assignments.append("route = ?")
+            values.append(route)
         if status is not None:
             assignments.append("status = ?")
             values.append(status)
@@ -155,7 +166,7 @@ class SQLiteRepository:
         with self._connect() as connection:
             row = connection.execute(
                 """
-                SELECT run_id, session_id, intent, status, requires_confirmation,
+                SELECT run_id, session_id, intent, route, status, requires_confirmation,
                        approval_status, latest_reply, pending_actions_json,
                        created_at, updated_at
                 FROM runs

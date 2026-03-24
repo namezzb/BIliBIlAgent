@@ -17,6 +17,7 @@ class ChatResponse(BaseModel):
     session_id: str
     run_id: str
     intent: str | None = None
+    route: str | None = None
     status: str
     reply: str
     requires_confirmation: bool = False

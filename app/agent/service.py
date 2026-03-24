@@ -6,7 +6,7 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.types import Command, interrupt
 
 from app.agent.events import aggregate_chat_response
-from app.agent.types import AgentState, IntentType, PendingAction
+from app.agent.types import AgentState, IntentType, PendingAction, RouteType
 from app.db.repository import SQLiteRepository
 from app.services.llm import OpenAICompatibleLLM
 
@@ -134,29 +134,33 @@ class AgentOrchestrator:
         return {}
 
     def _classify_intent(self, state: AgentState) -> dict[str, Any]:
-        intent = self._detect_intent(state["current_message"])
+        route = self._detect_route(state["current_message"])
+        intent = self._intent_from_route(route)
         self.repository.upsert_run_step(
             state["run_id"],
             "classify_intent",
             "classify_intent",
             "completed",
             input_summary=state["current_message"],
-            output_summary=intent,
+            output_summary=f"{route} -> {intent}",
         )
         self._emit_event(
             state["run_id"],
             "intent_classified",
             {
                 "intent": intent,
+                "route": route,
                 "message": state["current_message"],
             },
         )
-        return {"intent": intent}
+        return {"intent": intent, "route": route}
 
     def _plan_or_answer(self, state: AgentState) -> dict[str, Any]:
         intent = state["intent"]
-        if intent == "tool_request":
-            pending_actions = self._build_pending_actions(state["current_message"])
+        route = state["route"]
+        #工具 "import_request", "retry_request"
+        if route in {"import_request", "retry_request"}:
+            pending_actions = self._build_pending_actions(route, state["current_message"])
             response = (
                 "This request needs confirmation before execution. Review the planned "
                 "actions and call the confirmation endpoint to continue."
@@ -174,6 +178,7 @@ class AgentOrchestrator:
                 "response_prepared",
                 {
                     "intent": intent,
+                    "route": route,
                     "reply": response,
                     "pending_actions": pending_actions,
                 },
@@ -185,10 +190,18 @@ class AgentOrchestrator:
                 "response": response,
             }
 
-        if intent == "knowledge_query":
+        # favorite_knowledge_query
+        if route == "favorite_knowledge_query":
             response = (
-                "Knowledge retrieval is recognized but not connected yet. "
-                "The orchestration layer is ready for a future retrieval tool."
+                "Favorite-folder knowledge query is recognized, but the retrieval chain "
+                "is not connected yet."
+            )
+
+        # video_knowledge_query
+        elif route == "video_knowledge_query":
+            response = (
+                "Single-video knowledge query is recognized, but the retrieval chain "
+                "is not connected yet."
             )
         else:
             response = self.llm.chat(state.get("messages", []))
@@ -203,13 +216,14 @@ class AgentOrchestrator:
         )
         self._emit_event(
             state["run_id"],
-            "response_prepared",
-            {
-                "intent": intent,
-                "reply": response,
-                "pending_actions": [],
-            },
-        )
+                "response_prepared",
+                {
+                    "intent": intent,
+                    "route": route,
+                    "reply": response,
+                    "pending_actions": [],
+                },
+            )
         return {
             "requires_confirmation": False,
             "status": "completed",
@@ -230,11 +244,14 @@ class AgentOrchestrator:
             input_summary="user approval required",
             output_summary="waiting for confirmation",
         )
+
+        #需要批准前
         self._emit_event(
             state["run_id"],
             "confirmation_required",
             {
                 "question": payload["question"],
+                "route": state.get("route"),
                 "pending_actions": payload["pending_actions"],
                 "reply": state.get("response", ""),
             },
@@ -250,11 +267,14 @@ class AgentOrchestrator:
             input_summary="received confirmation decision",
             output_summary=approval_status,
         )
+
+        # 批准后
         self._emit_event(
             state["run_id"],
             "confirmation_resolved",
             {
                 "approved": approved,
+                "route": state.get("route"),
                 "reply": (
                     state.get("response", "")
                     if approved
@@ -277,10 +297,13 @@ class AgentOrchestrator:
             "Execution was approved. The tool pipeline placeholder ran successfully, "
             "but real Bilibili import tools are not wired in yet."
         )
+        route = state.get("route")
+        tool_name = "bilibili_import" if route == "import_request" else "bilibili_retry"
+        action_name = "prepare_import_plan" if route == "import_request" else "prepare_retry_plan"
         self._emit_event(
             state["run_id"],
             "tool_execution_started",
-            {"tool": "bilibili_import", "action": "prepare_import_plan"},
+            {"route": route, "tool": tool_name, "action": action_name},
         )
         self.repository.upsert_run_step(
             state["run_id"],
@@ -294,8 +317,9 @@ class AgentOrchestrator:
             state["run_id"],
             "tool_execution_finished",
             {
-                "tool": "bilibili_import",
-                "action": "prepare_import_plan",
+                "route": route,
+                "tool": tool_name,
+                "action": action_name,
                 "reply": response,
             },
         )
@@ -317,32 +341,65 @@ class AgentOrchestrator:
             event_type,
             {
                 "status": status,
+                "route": state.get("route"),
                 "reply": state.get("response", ""),
             },
         )
         return {"status": status}
 
-    def _detect_intent(self, message: str) -> IntentType:
+    def _detect_route(self, message: str) -> RouteType:
         lowered = message.lower()
-        tool_keywords = ("导入", "同步", "重试", "拉取", "import", "retry", "sync")
-        knowledge_keywords = (
-            "收藏夹",
-            "视频",
+        retry_keywords = ("重试", "retry", "重新执行", "重跑", "失败项")
+        import_keywords = ("导入", "import", "同步", "sync", "导进知识库", "拉取")
+        video_keywords = (
+            "bv",
+            "av",
             "分p",
+            "这一期",
+            "这个视频",
+            "这期视频",
+        )
+        knowledge_keywords = (
             "讲了什么",
             "内容",
             "知识库",
             "字幕",
             "qa",
+            "相关视频",
+            "有哪些",
         )
 
-        if any(keyword in lowered for keyword in tool_keywords):
-            return "tool_request"
-        if any(keyword in lowered for keyword in knowledge_keywords):
-            return "knowledge_query"
+        if any(keyword in lowered for keyword in retry_keywords):
+            return "retry_request"
+        if any(keyword in lowered for keyword in import_keywords):
+            return "import_request"
+        if "收藏夹" in lowered and any(keyword in lowered for keyword in knowledge_keywords):
+            return "favorite_knowledge_query"
+        if any(keyword in lowered for keyword in video_keywords) and any(
+            keyword in lowered for keyword in knowledge_keywords + ("讲了什么",)
+        ):
+            return "video_knowledge_query"
+        if any(keyword in lowered for keyword in ("bv", "av", "分p", "这个视频", "这期视频")):
+            return "video_knowledge_query"
         return "general_chat"
 
-    def _build_pending_actions(self, message: str) -> list[PendingAction]:
+    def _intent_from_route(self, route: RouteType) -> IntentType:
+        if route in {"favorite_knowledge_query", "video_knowledge_query"}:
+            return "knowledge_query"
+        if route in {"import_request", "retry_request"}:
+            return "tool_request"
+        return "general_chat"
+
+    def _build_pending_actions(self, route: RouteType, message: str) -> list[PendingAction]:
+        if route == "retry_request":
+            return [
+                {
+                    "tool": "bilibili_retry",
+                    "action": "prepare_retry_plan",
+                    "target": "failed-import-items",
+                    "description": f"Prepare a retry task for failed ingestion items related to: {message}",
+                }
+            ]
         return [
             {
                 "tool": "bilibili_import",

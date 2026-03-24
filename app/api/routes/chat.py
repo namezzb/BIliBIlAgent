@@ -45,6 +45,7 @@ def chat(request: Request, payload: ChatRequest) -> ChatResponse:
     repository.update_run(
         run_id,
         intent=result["intent"],
+        route=result["route"],
         status=result["status"],
         requires_confirmation=result["requires_confirmation"],
         approval_status=result["approval_status"],
@@ -77,6 +78,7 @@ def confirm_run(
     repository.update_run(
         run_id,
         intent=result["intent"],
+        route=result["route"],
         status=result["status"],
         requires_confirmation=result["requires_confirmation"],
         approval_status=result["approval_status"],
@@ -98,6 +100,7 @@ def get_run(run_id: str, request: Request) -> RunDetailResponse:
         session_id=existing_run["session_id"],
         run_id=existing_run["run_id"],
         intent=existing_run["intent"],
+        route=existing_run["route"],
         status=existing_run["status"],
         reply=existing_run["latest_reply"] or "",
         requires_confirmation=existing_run["requires_confirmation"],

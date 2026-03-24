@@ -21,6 +21,7 @@ SCHEMA_STATEMENTS = [
         run_id TEXT PRIMARY KEY,
         session_id TEXT NOT NULL,
         intent TEXT,
+        route TEXT,
         status TEXT NOT NULL,
         requires_confirmation INTEGER NOT NULL DEFAULT 0,
         approval_status TEXT,

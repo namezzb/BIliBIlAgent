@@ -32,7 +32,7 @@
     "dependencies": [],
     "passes": true,
     "priority": "P0",
-    "notes": "首版只支持单一 `agent` 模式，不再区分 chat、plan、execute。"
+    "notes": "首版只支持单一 `agent` 模式，不再区分 chat、plan、execute。已实现 `FastAPI + LangGraph + SQLite` 编排骨架，支持 `session_id/run_id` 分层、运行事件 `run_events` 持久化、同步接口事件聚合、`/api/runs/{run_id}/events` SSE 订阅，以及基于 `run_id` 的确认恢复执行链路。"
   },
   {
     "id": "chat-routing",
@@ -63,8 +63,9 @@
     "dependencies": [
       "agent-orchestration"
     ],
-    "passes": false,
-    "priority": "P0"
+    "passes": true,
+    "priority": "P0",
+    "notes": "已实现细粒度五类路由：`general_chat`、`favorite_knowledge_query`、`video_knowledge_query`、`import_request`、`retry_request`。对外保留 `intent` 大类兼容，同时新增 `route` 字段到同步响应、运行详情和 SSE 事件；知识问答与导入/重试当前仍走占位分支。"
   },
   {
     "id": "session-memory-management",
