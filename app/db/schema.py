@@ -2,6 +2,7 @@ SCHEMA_STATEMENTS = [
     """
     CREATE TABLE IF NOT EXISTS sessions (
         session_id TEXT PRIMARY KEY,
+        user_id TEXT,
         summary_text TEXT,
         recent_context_json TEXT,
         created_at TEXT NOT NULL,
@@ -57,6 +58,14 @@ SCHEMA_STATEMENTS = [
         payload_json TEXT NOT NULL,
         created_at TEXT NOT NULL,
         UNIQUE(run_id, sequence)
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS user_memory_profiles (
+        user_id TEXT PRIMARY KEY,
+        profile_json TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
     )
     """,
 ]

@@ -6,6 +6,7 @@ from fastapi.testclient import TestClient
 from app.core.config import Settings
 from app.db.repository import SQLiteRepository
 from app.main import create_app
+from app.services.llm import OpenAICompatibleLLM
 from app.services.session_memory import SessionMemoryManager
 
 
@@ -161,6 +162,7 @@ def test_session_detail_returns_history_and_recent_context(tmp_path: Path) -> No
         assert detail.status_code == 200
         body = detail.json()
         assert body["session_id"] == session_id
+        assert body["user_id"] is None
         assert len(body["messages"]) == 4
         assert body["recent_context"]["last_run_id"]
         assert body["recent_context"]["last_user_message"] == "我刚刚问了什么？"
@@ -233,3 +235,141 @@ def test_summary_is_injected_as_assistant_context_message(tmp_path: Path) -> Non
     assert session_context["session_summary"] == "Compressed summary from model."
     assert session_context["messages"][0]["role"] == "assistant"
     assert "Compressed summary from model." in session_context["messages"][0]["content"]
+
+
+def test_user_memory_command_requires_user_id(tmp_path: Path) -> None:
+    with build_client(tmp_path) as client:
+        response = client.post("/api/chat", json={"message": "记住偏好: reply_language=zh-CN"})
+
+        assert response.status_code == 200
+        body = response.json()
+        assert body["status"] == "completed"
+        assert "user_id" in body["reply"]
+
+
+def test_user_memory_chat_command_persists_and_get_endpoint_returns_profile(tmp_path: Path) -> None:
+    with build_client(tmp_path) as client:
+        response = client.post(
+            "/api/chat",
+            json={"user_id": "user-1", "message": "记住偏好: reply_language=zh-CN"},
+        )
+
+        assert response.status_code == 200
+        assert "已保存长期记忆" in response.json()["reply"]
+
+        detail = client.get("/api/users/user-1/memory")
+        assert detail.status_code == 200
+        body = detail.json()
+        assert body["user_id"] == "user-1"
+        assert body["preferences"]["reply_language"]["value"] == "zh-CN"
+        assert body["preferences"]["reply_language"]["source_type"] == "chat_command"
+        assert body["preferences"]["reply_language"]["source_text"] == "记住偏好: reply_language=zh-CN"
+        assert body["preferences"]["reply_language"]["source_run_id"]
+        assert body["preferences"]["reply_language"]["confirmed"] is True
+
+
+def test_user_memory_rest_patch_is_partial_and_delete_removes_entry(tmp_path: Path) -> None:
+    with build_client(tmp_path) as client:
+        patch_one = client.patch(
+            "/api/users/user-2/memory",
+            json={"preferences": {"timezone": "Asia/Shanghai"}},
+        )
+        assert patch_one.status_code == 200
+        assert patch_one.json()["preferences"]["timezone"]["source_type"] == "api"
+
+        patch_two = client.patch(
+            "/api/users/user-2/memory",
+            json={"aliases": {"me": "张三"}},
+        )
+        assert patch_two.status_code == 200
+        body = patch_two.json()
+        assert body["preferences"]["timezone"]["value"] == "Asia/Shanghai"
+        assert body["aliases"]["me"]["value"] == "张三"
+
+        deleted = client.delete("/api/users/user-2/memory/aliases/me")
+        assert deleted.status_code == 200
+        deleted_body = deleted.json()
+        assert "me" not in deleted_body["aliases"]
+        assert deleted_body["preferences"]["timezone"]["value"] == "Asia/Shanghai"
+
+
+def test_user_memory_is_loaded_across_sessions_for_same_user(tmp_path: Path) -> None:
+    with build_client(tmp_path) as client:
+        client.post(
+            "/api/chat",
+            json={"user_id": "user-3", "message": "记住偏好: reply_language=zh-CN"},
+        )
+
+        second_response = client.post(
+            "/api/chat",
+            json={"user_id": "user-3", "message": "hello again"},
+        )
+        run_id = second_response.json()["run_id"]
+
+        with client.stream("GET", f"/api/runs/{run_id}/events?follow=false") as stream_response:
+            assert stream_response.status_code == 200
+            events = []
+            for line in stream_response.iter_lines():
+                if line.startswith("data: "):
+                    events.append(json.loads(line[6:]))
+
+        context_event = next(event for event in events if event["type"] == "context_loaded")
+        assert context_event["payload"]["user_memory_present"] is True
+
+
+def test_view_user_memory_command_returns_summary(tmp_path: Path) -> None:
+    with build_client(tmp_path) as client:
+        client.patch(
+            "/api/users/user-4/memory",
+            json={"default_scopes": {"favorite_folder": "ai-learning"}},
+        )
+
+        response = client.post(
+            "/api/chat",
+            json={"user_id": "user-4", "message": "查看长期记忆"},
+        )
+
+        assert response.status_code == 200
+        body = response.json()
+        assert "当前长期记忆" in body["reply"]
+        assert "favorite_folder = ai-learning" in body["reply"]
+
+
+class RecordingLLM(OpenAICompatibleLLM):
+    def __init__(self) -> None:
+        super().__init__(
+            api_key="test-key",
+            base_url="https://example.com/v1",
+            model="test-model",
+            summary_model="test-summary-model",
+            embedding_model="test-embedding-model",
+            system_prompt="base system prompt",
+        )
+        self.last_messages: list[dict[str, str]] = []
+
+    def _create_chat_completion(
+        self,
+        *,
+        messages: list[dict[str, str]],
+        model: str,
+        temperature: float,
+    ) -> str | None:
+        self.last_messages = messages
+        return "ok"
+
+
+def test_llm_chat_injects_user_memory_after_base_system_prompt() -> None:
+    llm = RecordingLLM()
+
+    result = llm.chat(
+        [
+            {"role": "assistant", "content": "[Conversation summary for context only]\nsummary"},
+            {"role": "user", "content": "hello"},
+        ],
+        extra_system_messages=["long-term memory"],
+    )
+
+    assert result == "ok"
+    assert llm.last_messages[0] == {"role": "system", "content": "base system prompt"}
+    assert llm.last_messages[1] == {"role": "system", "content": "long-term memory"}
+    assert llm.last_messages[2]["role"] == "assistant"

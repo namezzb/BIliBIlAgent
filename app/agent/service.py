@@ -9,6 +9,7 @@ from app.agent.events import aggregate_chat_response
 from app.agent.types import AgentState, IntentType, PendingAction, RouteType
 from app.db.repository import SQLiteRepository
 from app.services.llm import OpenAICompatibleLLM
+from app.services.user_memory import UserMemoryManager
 
 
 class AgentOrchestrator:
@@ -17,9 +18,11 @@ class AgentOrchestrator:
         repository: SQLiteRepository,
         llm: OpenAICompatibleLLM,
         checkpoint_db_path: Path,
+        user_memory: UserMemoryManager,
     ) -> None:
         self.repository = repository
         self.llm = llm
+        self.user_memory = user_memory
         self._checkpointer_cm = SqliteSaver.from_conn_string(str(checkpoint_db_path))
         self.checkpointer = self._checkpointer_cm.__enter__()
         self.graph = self._build_graph()
@@ -34,25 +37,30 @@ class AgentOrchestrator:
         run_id: str,
         message: str,
         messages: list[dict[str, str]],
+        user_id: str | None = None,
         session_summary: str | None = None,
         recent_context: dict[str, object] | None = None,
+        user_memory_context: str | None = None,
     ) -> dict[str, Any]:
         self._emit_event(
             run_id,
             "run_started",
             {
                 "session_id": session_id,
+                "user_id": user_id,
                 "message": message,
             },
         )
         self.graph.invoke(
             {
                 "session_id": session_id,
+                "user_id": user_id,
                 "run_id": run_id,
                 "current_message": message,
                 "messages": messages,
                 "session_summary": session_summary,
                 "recent_context": recent_context or {},
+                "user_memory_context": user_memory_context,
                 "status": "running",
                 "requires_confirmation": False,
                 "pending_actions": [],
@@ -128,7 +136,10 @@ class AgentOrchestrator:
             "load_context",
             "completed",
             input_summary="load session history",
-            output_summary=f"loaded {len(state.get('messages', []))} messages",
+            output_summary=(
+                f"loaded {len(state.get('messages', []))} messages; "
+                f"user_memory_present={bool(state.get('user_memory_context'))}"
+            ),
         )
         self._emit_event(
             state["run_id"],
@@ -137,6 +148,7 @@ class AgentOrchestrator:
                 "message_count": len(state.get("messages", [])),
                 "summary_present": bool(state.get("session_summary")),
                 "recent_context_available": bool(state.get("recent_context")),
+                "user_memory_present": bool(state.get("user_memory_context")),
             },
         )
         return {}
@@ -166,6 +178,8 @@ class AgentOrchestrator:
     def _plan_or_answer(self, state: AgentState) -> dict[str, Any]:
         intent = state["intent"]
         route = state["route"]
+
+        #命中导入,重试
         if route in {"import_request", "retry_request"}:
             pending_actions = self._build_pending_actions(route, state["current_message"])
             response = (
@@ -197,18 +211,41 @@ class AgentOrchestrator:
                 "response": response,
             }
 
-        if route == "favorite_knowledge_query":
+
+        #命中保存记忆的操作
+        if self.user_memory.is_chat_command(state["current_message"]):
+            user_id = state.get("user_id")
+            if not user_id:
+                response = "长期记忆操作需要显式传入 user_id。"
+            else:
+                response = self.user_memory.apply_chat_command(
+                    user_id,
+                    state["current_message"],
+                    state["run_id"],
+                )
+        #命中收藏夹检索
+        elif route == "favorite_knowledge_query":
             response = (
                 "Favorite-folder knowledge query is recognized, but the retrieval chain "
                 "is not connected yet."
             )
+
+        #命中具体视频信息解释
         elif route == "video_knowledge_query":
             response = (
                 "Single-video knowledge query is recognized, but the retrieval chain "
                 "is not connected yet."
             )
+
+        #普通回答
         else:
-            response = self.llm.chat(state.get("messages", []))
+            extra_system_messages = []
+            if state.get("user_memory_context"):
+                extra_system_messages.append(str(state["user_memory_context"]))
+            response = self.llm.chat(
+                state.get("messages", []),
+                extra_system_messages=extra_system_messages,
+            )
 
         self.repository.upsert_run_step(
             state["run_id"],

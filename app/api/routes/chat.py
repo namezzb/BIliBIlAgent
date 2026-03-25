@@ -1,4 +1,5 @@
 import asyncio
+from typing import Literal
 from uuid import uuid4
 
 from fastapi import APIRouter, HTTPException, Query, Request, status
@@ -11,6 +12,8 @@ from app.api.schemas import (
     RunConfirmationRequest,
     RunDetailResponse,
     SessionDetailResponse,
+    UserMemoryPatchRequest,
+    UserMemoryProfileResponse,
 )
 
 
@@ -25,23 +28,39 @@ def chat(request: Request, payload: ChatRequest) -> ChatResponse:
     session_memory = request.app.state.session_memory
 
     session_id = payload.session_id or str(uuid4())
-    if repository.session_exists(session_id):
+    session = repository.get_session(session_id)
+    if session is not None:
+        session_user_id = session.get("user_id")
+        if session_user_id and payload.user_id and session_user_id != payload.user_id:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Session is already bound to a different user_id.",
+            )
+        if payload.user_id and session_user_id is None:
+            repository.set_session_user_id(session_id, payload.user_id)
         repository.touch_session(session_id)
+        user_id = payload.user_id or session_user_id
     else:
-        repository.create_session(session_id)
+        repository.create_session(session_id, user_id=payload.user_id)
+        user_id = payload.user_id
 
     run_id = str(uuid4())
     repository.create_run(run_id, session_id, status="running")
     repository.add_message(session_id, "user", payload.message, run_id=run_id)
     session_context = session_memory.load_session_context(session_id)
+    user_memory_context = None
+    if user_id:
+        user_memory_context = request.app.state.user_memory.build_context_message(user_id)
 
     result = orchestrator.invoke_chat(
         session_id=session_id,
         run_id=run_id,
         message=payload.message,
         messages=session_context["messages"],
+        user_id=user_id,
         session_summary=session_context["session_summary"],
         recent_context=session_context["recent_context"],
+        user_memory_context=user_memory_context,
     )
     repository.update_run(
         run_id,
@@ -140,6 +159,47 @@ def get_session(session_id: str, request: Request) -> SessionDetailResponse:
     if session_detail is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Session not found.")
     return SessionDetailResponse(**session_detail)
+
+
+@router.get("/users/{user_id}/memory", response_model=UserMemoryProfileResponse)
+def get_user_memory(user_id: str, request: Request) -> UserMemoryProfileResponse:
+    user_memory = request.app.state.user_memory
+    return UserMemoryProfileResponse(**user_memory.get_profile_detail(user_id))
+
+
+@router.patch("/users/{user_id}/memory", response_model=UserMemoryProfileResponse)
+def patch_user_memory(
+    user_id: str,
+    payload: UserMemoryPatchRequest,
+    request: Request,
+) -> UserMemoryProfileResponse:
+    user_memory = request.app.state.user_memory
+    updates = payload.to_updates()
+    if not updates:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="At least one user-memory group must be provided.",
+        )
+    detail = user_memory.upsert_entries(
+        user_id,
+        updates,
+        source_type="api",
+        source_run_id=None,
+        source_text=None,
+    )
+    return UserMemoryProfileResponse(**detail)
+
+
+@router.delete("/users/{user_id}/memory/{group}/{key}", response_model=UserMemoryProfileResponse)
+def delete_user_memory(
+    user_id: str,
+    group: Literal["preferences", "aliases", "default_scopes"],
+    key: str,
+    request: Request,
+) -> UserMemoryProfileResponse:
+    user_memory = request.app.state.user_memory
+    user_memory.delete_entry(user_id, group, key)
+    return UserMemoryProfileResponse(**user_memory.get_profile_detail(user_id))
 
 
 @router.get("/runs/{run_id}/events")

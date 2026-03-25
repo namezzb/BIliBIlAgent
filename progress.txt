@@ -115,3 +115,19 @@ Blockers:
 - None.
 Next step:
 - Decide whether to prioritize `knowledge-memory-index` or `runtime-memory-audit` for the next P0 implementation step.
+
+2026-03-25 15:20 CST
+Current goal: Implement `user-memory-management` as the next unfinished item in `feature_list.json`.
+Completed:
+- Added explicit `user_id` support to sessions and chat requests so long-term memory can persist across sessions without being tied to `session_id`.
+- Added a persistent `user_memory_profiles` store with structured `preferences` / `aliases` / `default_scopes` entries, including source metadata, confirmation flag, and timestamps.
+- Implemented `UserMemoryManager` with command-based chat operations for `查看长期记忆`, `记住*`, and `删除*`, plus `GET/PATCH/DELETE /api/users/{user_id}/memory` REST management endpoints.
+- Injected long-term user memory as a dedicated system-context message for model calls instead of merging it into session summaries or chat history.
+- Extended the test suite to cover missing-`user_id` guardrails, chat-command persistence, partial REST updates, deletion, cross-session memory loading, and system-message ordering.
+- Verified the full backend test suite with `poetry run pytest` (`17 passed`).
+In progress:
+- None.
+Blockers:
+- None.
+Next step:
+- Implement the next unfinished feature after `user-memory-management`, which is `knowledge-memory-index` unless priorities change.

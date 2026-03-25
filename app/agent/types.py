@@ -39,11 +39,13 @@ class PendingAction(TypedDict, total=False):
 
 class AgentState(TypedDict, total=False):
     session_id: str
+    user_id: str | None
     run_id: str
     current_message: str
     messages: list[dict[str, str]]
     session_summary: str | None
     recent_context: dict[str, object]
+    user_memory_context: str | None
     intent: IntentType
     route: RouteType
     status: RunStatus

@@ -127,9 +127,9 @@
     "dependencies": [
       "session-memory-management"
     ],
-    "passes": false,
+    "passes": true,
     "priority": "P1",
-    "notes": "首版只记录显式偏好，不做隐式画像。"
+    "notes": "首版采用显式 `user_id` 隔离的结构化长期记忆档案，按 `preferences`、`aliases`、`default_scopes` 三组存储，并记录来源、确认状态与时间戳。已支持聊天命令式写入/查看/删除，以及 `GET/PATCH/DELETE /api/users/{user_id}/memory` 管理接口；长期记忆作为独立 system context 注入模型，不并入 session summary 或聊天历史。"
   },
   {
     "id": "knowledge-memory-index",

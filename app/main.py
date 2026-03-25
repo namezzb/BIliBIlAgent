@@ -8,6 +8,7 @@ from app.core.config import Settings, get_settings
 from app.db.repository import SQLiteRepository
 from app.services.llm import OpenAICompatibleLLM
 from app.services.session_memory import SessionMemoryManager
+from app.services.user_memory import UserMemoryManager
 
 
 @asynccontextmanager
@@ -23,16 +24,19 @@ async def lifespan(app: FastAPI):
         embedding_model=settings.embedding_model,
         system_prompt=settings.llm_system_prompt,
     )
+    user_memory = UserMemoryManager(repository)
     orchestrator = AgentOrchestrator(
         repository=repository,
         llm=llm,
         checkpoint_db_path=settings.checkpoint_db_path,
+        user_memory=user_memory,
     )
     session_memory = SessionMemoryManager(repository, llm)
 
     app.state.repository = repository
     app.state.orchestrator = orchestrator
     app.state.session_memory = session_memory
+    app.state.user_memory = user_memory
 
     try:
         yield

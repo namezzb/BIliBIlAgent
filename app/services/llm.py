@@ -30,13 +30,26 @@ class OpenAICompatibleLLM:
             self._client = OpenAI(**client_kwargs)
         return self._client
 
-    def chat(self, messages: list[dict[str, str]]) -> str:
+    def chat(
+        self,
+        messages: list[dict[str, str]],
+        *,
+        extra_system_messages: list[str] | None = None,
+    ) -> str:
         if not self.api_key:
             return self._fallback_chat(messages)
 
+        system_messages = [{"role": "system", "content": self.system_prompt}]
+        if extra_system_messages:
+            system_messages.extend(
+                {"role": "system", "content": content}
+                for content in extra_system_messages
+                if content.strip()
+            )
+
         try:
             content = self._create_chat_completion(
-                messages=[{"role": "system", "content": self.system_prompt}, *messages],
+                messages=[*system_messages, *messages],
                 model=self.model,
                 temperature=0.2,
             )

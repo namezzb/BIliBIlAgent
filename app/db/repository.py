@@ -21,9 +21,16 @@ class SQLiteRepository:
         with self._connect() as connection:
             for statement in SCHEMA_STATEMENTS:
                 connection.execute(statement)
+            self._ensure_sessions_user_id_column(connection)
             self._ensure_sessions_memory_columns(connection)
             self._ensure_runs_route_column(connection)
             connection.commit()
+
+    def _ensure_sessions_user_id_column(self, connection: sqlite3.Connection) -> None:
+        rows = connection.execute("PRAGMA table_info(sessions)").fetchall()
+        columns = {row["name"] for row in rows}
+        if "user_id" not in columns:
+            connection.execute("ALTER TABLE sessions ADD COLUMN user_id TEXT")
 
     def _ensure_sessions_memory_columns(self, connection: sqlite3.Connection) -> None:
         rows = connection.execute("PRAGMA table_info(sessions)").fetchall()
@@ -52,15 +59,15 @@ class SQLiteRepository:
             ).fetchone()
         return row is not None
 
-    def create_session(self, session_id: str) -> None:
+    def create_session(self, session_id: str, user_id: str | None = None) -> None:
         timestamp = utc_now()
         with self._connect() as connection:
             connection.execute(
                 """
-                INSERT INTO sessions (session_id, created_at, updated_at)
-                VALUES (?, ?, ?)
+                INSERT INTO sessions (session_id, user_id, created_at, updated_at)
+                VALUES (?, ?, ?, ?)
                 """,
-                (session_id, timestamp, timestamp),
+                (session_id, user_id, timestamp, timestamp),
             )
             connection.commit()
 
@@ -69,6 +76,14 @@ class SQLiteRepository:
             connection.execute(
                 "UPDATE sessions SET updated_at = ? WHERE session_id = ?",
                 (utc_now(), session_id),
+            )
+            connection.commit()
+
+    def set_session_user_id(self, session_id: str, user_id: str) -> None:
+        with self._connect() as connection:
+            connection.execute(
+                "UPDATE sessions SET user_id = ?, updated_at = ? WHERE session_id = ?",
+                (user_id, utc_now(), session_id),
             )
             connection.commit()
 
@@ -99,7 +114,7 @@ class SQLiteRepository:
         with self._connect() as connection:
             row = connection.execute(
                 """
-                SELECT session_id, summary_text, recent_context_json, created_at, updated_at
+                SELECT session_id, user_id, summary_text, recent_context_json, created_at, updated_at
                 FROM sessions
                 WHERE session_id = ?
                 """,
@@ -230,6 +245,53 @@ class SQLiteRepository:
         pending_actions_json = result.pop("pending_actions_json")
         result["pending_actions"] = json.loads(pending_actions_json) if pending_actions_json else []
         return result
+
+    def get_user_memory_profile(self, user_id: str) -> dict[str, Any] | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT user_id, profile_json, created_at, updated_at
+                FROM user_memory_profiles
+                WHERE user_id = ?
+                """,
+                (user_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        return {
+            "user_id": row["user_id"],
+            "profile": json.loads(row["profile_json"]),
+            "created_at": row["created_at"],
+            "updated_at": row["updated_at"],
+        }
+
+    def upsert_user_memory_profile(self, user_id: str, profile: dict[str, Any]) -> dict[str, Any]:
+        existing_profile = self.get_user_memory_profile(user_id)
+        timestamp = utc_now()
+        created_at = existing_profile["created_at"] if existing_profile is not None else timestamp
+        with self._connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO user_memory_profiles (user_id, profile_json, created_at, updated_at)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(user_id) DO UPDATE SET
+                    profile_json = excluded.profile_json,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    user_id,
+                    json.dumps(profile, ensure_ascii=False),
+                    created_at,
+                    timestamp,
+                ),
+            )
+            connection.commit()
+        return {
+            "user_id": user_id,
+            "profile": profile,
+            "created_at": created_at,
+            "updated_at": timestamp,
+        }
 
     def upsert_run_step(
         self,
