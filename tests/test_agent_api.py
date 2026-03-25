@@ -4,7 +4,9 @@ from pathlib import Path
 from fastapi.testclient import TestClient
 
 from app.core.config import Settings
+from app.db.repository import SQLiteRepository
 from app.main import create_app
+from app.services.session_memory import SessionMemoryManager
 
 
 def build_client(tmp_path: Path) -> TestClient:
@@ -198,3 +200,36 @@ def test_long_session_generates_summary_and_sessions_are_isolated(tmp_path: Path
         assert body_a["summary_text"]
         assert len(body_a["messages"]) > len(body_b["messages"])
         assert all(message["content"] != "另一条会话" for message in body_a["messages"])
+
+
+class FakeSummaryLLM:
+    def summarize_conversation(self, messages: list[dict[str, str]]) -> str | None:
+        return "Compressed summary from model."
+
+
+def test_summary_is_injected_as_assistant_context_message(tmp_path: Path) -> None:
+    repository = SQLiteRepository(tmp_path / "memory.db")
+    repository.initialize()
+    session_id = "session-1"
+    repository.create_session(session_id)
+
+    for index in range(5):
+        repository.add_message(session_id, "user", f"user-{index}")
+        repository.add_message(session_id, "assistant", f"assistant-{index}")
+
+    manager = SessionMemoryManager(repository, FakeSummaryLLM())
+    manager.refresh_session_memory(
+        session_id,
+        run_id="run-1",
+        intent="general_chat",
+        route="general_chat",
+        status="completed",
+        reply="assistant-4",
+        pending_actions=[],
+    )
+
+    session_context = manager.load_session_context(session_id)
+
+    assert session_context["session_summary"] == "Compressed summary from model."
+    assert session_context["messages"][0]["role"] == "assistant"
+    assert "Compressed summary from model." in session_context["messages"][0]["content"]

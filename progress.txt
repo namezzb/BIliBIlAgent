@@ -99,3 +99,19 @@ Blockers:
 - None.
 Next step:
 - Implement `knowledge-memory-index` or `runtime-memory-audit`, depending on whether we want to prioritize retrieval-ready storage or deeper execution auditing next.
+
+2026-03-25 10:35 CST
+Current goal: Align session-memory handling with model-generated summaries and OpenRouter-compatible LLM configuration.
+Completed:
+- Updated LLM configuration defaults to OpenRouter-compatible values and added env alias support for `OPENROUTER_API_KEY` and `OPENROUTER_BASE_URL`.
+- Extended the shared LLM provider with conversation summarization and embedding-client entrypoints.
+- Replaced session summary generation with a model-first path that falls back to the existing rule summary on provider failure.
+- Changed prompt construction so session summaries are injected as a dedicated `assistant` context message instead of being merged into the global system prompt.
+- Added `.env.example` with OpenRouter and embedding placeholders.
+- Added tests covering assistant-role summary injection and verified the suite with `poetry run pytest` (`11 passed`).
+In progress:
+- None.
+Blockers:
+- None.
+Next step:
+- Decide whether to prioritize `knowledge-memory-index` or `runtime-memory-audit` for the next P0 implementation step.

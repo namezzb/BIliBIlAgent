@@ -19,6 +19,8 @@ async def lifespan(app: FastAPI):
         api_key=settings.llm_api_key,
         base_url=settings.llm_base_url,
         model=settings.llm_model,
+        summary_model=settings.summary_model,
+        embedding_model=settings.embedding_model,
         system_prompt=settings.llm_system_prompt,
     )
     orchestrator = AgentOrchestrator(
@@ -26,7 +28,7 @@ async def lifespan(app: FastAPI):
         llm=llm,
         checkpoint_db_path=settings.checkpoint_db_path,
     )
-    session_memory = SessionMemoryManager(repository)
+    session_memory = SessionMemoryManager(repository, llm)
 
     app.state.repository = repository
     app.state.orchestrator = orchestrator

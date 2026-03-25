@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Any
 
 from app.db.repository import SQLiteRepository
+from app.services.llm import OpenAICompatibleLLM
 
 
 SUMMARY_TRIGGER_MESSAGES = 8
@@ -11,8 +12,13 @@ SUMMARY_LINE_LIMIT = 6
 
 
 class SessionMemoryManager:
-    def __init__(self, repository: SQLiteRepository) -> None:
+    def __init__(
+        self,
+        repository: SQLiteRepository,
+        llm: OpenAICompatibleLLM,
+    ) -> None:
         self.repository = repository
+        self.llm = llm
 
     def load_session_context(self, session_id: str) -> dict[str, Any]:
         session = self.repository.get_session(session_id) or {}
@@ -83,8 +89,8 @@ class SessionMemoryManager:
         if summary_text:
             prompt_messages.append(
                 {
-                    "role": "system",
-                    "content": f"Conversation summary:\n{summary_text}",
+                    "role": "assistant",
+                    "content": f"[Conversation summary for context only]\n{summary_text}",
                 }
             )
         prompt_messages.extend(
@@ -98,6 +104,21 @@ class SessionMemoryManager:
             return None
 
         older_messages = messages[:-RECENT_MESSAGE_LIMIT]
+        if not older_messages:
+            return None
+
+        model_summary = self.llm.summarize_conversation(
+            [
+                {"role": message["role"], "content": message["content"]}
+                for message in older_messages
+            ]
+        )
+        if model_summary:
+            return model_summary
+
+        return self._build_fallback_summary(older_messages)
+
+    def _build_fallback_summary(self, older_messages: list[dict[str, Any]]) -> str | None:
         if not older_messages:
             return None
 

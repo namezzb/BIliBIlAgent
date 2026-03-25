@@ -1,6 +1,7 @@
 from functools import lru_cache
 from pathlib import Path
 
+from pydantic import AliasChoices, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -11,9 +12,26 @@ class Settings(BaseSettings):
     data_dir: Path = Path("data")
     app_db_path: Path = Path("data/app.db")
     checkpoint_db_path: Path = Path("data/checkpoints.db")
-    llm_api_key: str | None = None
-    llm_base_url: str | None = None
-    llm_model: str = "gpt-4.1-mini"
+    llm_api_key: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("LLM_API_KEY", "OPENROUTER_API_KEY"),
+    )
+    llm_base_url: str = Field(
+        default="https://openrouter.ai/api/v1",
+        validation_alias=AliasChoices("LLM_BASE_URL", "OPENROUTER_BASE_URL"),
+    )
+    llm_model: str = Field(
+        default="qwen/qwen3-235b-a22b-2507",
+        validation_alias=AliasChoices("LLM_MODEL", "OPENROUTER_MODEL"),
+    )
+    summary_model: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("SUMMARY_MODEL", "OPENROUTER_SUMMARY_MODEL"),
+    )
+    embedding_model: str = Field(
+        default="openai/text-embedding-3-small",
+        validation_alias=AliasChoices("EMBEDDING_MODEL", "OPENROUTER_EMBEDDING_MODEL"),
+    )
     llm_system_prompt: str = (
         "You are BIliBIlAgent. Answer directly when the user asks for general chat. "
         "Keep responses concise and helpful."

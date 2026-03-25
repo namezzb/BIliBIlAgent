@@ -97,7 +97,7 @@
     ],
     "passes": true,
     "priority": "P0",
-    "notes": "该层只服务当前会话，不承载长期用户偏好。已实现会话消息持久化、`summary_text` 摘要、`recent_context` 最近上下文、基于摘要+最近消息的会话加载，以及 `GET /api/sessions/{session_id}` 会话读取接口。"
+    "notes": "该层只服务当前会话，不承载长期用户偏好。已实现会话消息持久化、`summary_text` 摘要、`recent_context` 最近上下文、基于摘要+最近消息的会话加载，以及 `GET /api/sessions/{session_id}` 会话读取接口。摘要现已改为优先使用真实大模型生成，失败时回退到规则摘要；模型请求中摘要作为独立 `assistant` 上下文消息注入，不再并入全局 system prompt。"
   },
   {
     "id": "user-memory-management",
