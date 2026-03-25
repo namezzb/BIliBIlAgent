@@ -7,7 +7,6 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.types import Command, interrupt
 
 from app.agent.events import aggregate_chat_response
-from app.agent.tools import TOOL_REGISTRY
 from app.agent.types import (
     AgentState,
     ExecutionPlan,
@@ -31,12 +30,13 @@ class AgentOrchestrator:
         checkpoint_db_path: Path,
         user_memory: UserMemoryManager,
         runtime_audit: LangSmithRuntimeAudit,
+        tool_registry: dict[tuple[str, str], Any],
     ) -> None:
         self.repository = repository
         self.llm = llm
         self.user_memory = user_memory
         self.runtime_audit = runtime_audit
-        self.tools = TOOL_REGISTRY
+        self.tools = tool_registry
         self._checkpointer_cm = SqliteSaver.from_conn_string(str(checkpoint_db_path))
         self.checkpointer = self._checkpointer_cm.__enter__()
         self.graph = self._build_graph()
@@ -670,7 +670,7 @@ class AgentOrchestrator:
         else:
             tool_call = {
                 "tool": "bilibili_import",
-                "action": "prepare_import_plan",
+                "action": "execute_import",
                 "target": "favorite-folder-ingestion",
                 "description": f"Import Bilibili favorite-folder content for: {message}",
                 "args": {

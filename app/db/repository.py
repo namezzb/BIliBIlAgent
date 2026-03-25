@@ -752,3 +752,103 @@ class SQLiteRepository:
                 (run_id,),
             ).fetchone()
         return int(row["total"]) if row is not None else 0
+
+    def upsert_import_run_item(
+        self,
+        run_id: str,
+        *,
+        favorite_folder_id: str,
+        video_id: str,
+        bvid: str | None,
+        title: str,
+        status: str,
+        needs_asr: bool = False,
+        failure_reason: str | None = None,
+        retryable: bool = False,
+        manifest: dict[str, Any] | None = None,
+        asr_job: dict[str, Any] | None = None,
+    ) -> None:
+        timestamp = utc_now()
+        with self._connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO import_run_items (
+                    run_id,
+                    favorite_folder_id,
+                    video_id,
+                    bvid,
+                    title,
+                    status,
+                    needs_asr,
+                    failure_reason,
+                    retryable,
+                    manifest_json,
+                    asr_job_json,
+                    created_at,
+                    updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(run_id, video_id) DO UPDATE SET
+                    favorite_folder_id = excluded.favorite_folder_id,
+                    bvid = excluded.bvid,
+                    title = excluded.title,
+                    status = excluded.status,
+                    needs_asr = excluded.needs_asr,
+                    failure_reason = excluded.failure_reason,
+                    retryable = excluded.retryable,
+                    manifest_json = excluded.manifest_json,
+                    asr_job_json = excluded.asr_job_json,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    run_id,
+                    favorite_folder_id,
+                    video_id,
+                    bvid,
+                    title,
+                    status,
+                    int(needs_asr),
+                    failure_reason,
+                    int(retryable),
+                    json.dumps(manifest, ensure_ascii=False) if manifest is not None else None,
+                    json.dumps(asr_job, ensure_ascii=False) if asr_job is not None else None,
+                    timestamp,
+                    timestamp,
+                ),
+            )
+            connection.commit()
+
+    def get_import_run_items(self, run_id: str) -> list[dict[str, Any]]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT
+                    run_id,
+                    favorite_folder_id,
+                    video_id,
+                    bvid,
+                    title,
+                    status,
+                    needs_asr,
+                    failure_reason,
+                    retryable,
+                    manifest_json,
+                    asr_job_json,
+                    created_at,
+                    updated_at
+                FROM import_run_items
+                WHERE run_id = ?
+                ORDER BY id ASC
+                """,
+                (run_id,),
+            ).fetchall()
+        results: list[dict[str, Any]] = []
+        for row in rows:
+            item = dict(row)
+            item["needs_asr"] = bool(item["needs_asr"])
+            item["retryable"] = bool(item["retryable"])
+            manifest_json = item.pop("manifest_json")
+            asr_job_json = item.pop("asr_job_json")
+            item["manifest"] = json.loads(manifest_json) if manifest_json else None
+            item["asr_job"] = json.loads(asr_job_json) if asr_job_json else None
+            results.append(item)
+        return results

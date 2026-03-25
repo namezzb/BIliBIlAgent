@@ -4,12 +4,21 @@ from contextlib import contextmanager
 from pathlib import Path
 from uuid import uuid4
 
+import httpx
 import pytest
 from fastapi.testclient import TestClient
 
+from app.agent.tools import build_bilibili_import_tool, build_tool_registry
 from app.core.config import Settings
 from app.db.repository import SQLiteRepository
 from app.main import create_app
+from app.services.bilibili_favorites import (
+    BilibiliFavoriteFolderAuthError,
+    BilibiliFavoriteFolderResponseError,
+    BilibiliFavoriteFolderService,
+    BilibiliFavoriteFolderUpstreamError,
+)
+from app.services.bilibili_import import BilibiliImportPipeline
 from app.services.knowledge_index import KnowledgeIndexService
 from app.services.llm import OpenAICompatibleLLM
 from app.services.runtime_audit import LangSmithRuntimeAudit
@@ -159,6 +168,260 @@ class FakeVectorIndex:
         return len(self.documents)
 
 
+class FakeBilibiliFavoriteFolderService:
+    def __init__(
+        self
+    ) -> None:
+        self.start_result = {
+            "qr_url": "https://passport.bilibili.com/h5-app/passport/login/scan",
+            "qrcode_key": "qr-key-1",
+            "expires_in_seconds": 180,
+        }
+        self.poll_result = {
+            "status": "success",
+            "message": "登录成功。",
+            "cookie": "DedeUserID=1; SESSDATA=test",
+            "refresh_token": "refresh-1",
+            "account": {"mid": 1, "uname": "tester", "is_login": True},
+        }
+        self.folder_result = {
+            "account": {"mid": 1, "uname": "tester", "is_login": True},
+            "total": 1,
+            "folders": [
+                {
+                    "favorite_folder_id": "101",
+                    "title": "AI Favorites",
+                    "intro": "AI folder",
+                    "cover": "https://img.example.test/cover.jpg",
+                    "media_count": 12,
+                    "folder_attr": 0,
+                    "owner_mid": 1,
+                }
+            ],
+        }
+        self.folder_items_result = {
+            "account": {"mid": 1, "uname": "tester", "is_login": True},
+            "folder": {
+                "favorite_folder_id": "101",
+                "title": "AI Favorites",
+                "intro": "AI folder",
+                "cover": "https://img.example.test/cover.jpg",
+                "media_count": 3,
+                "folder_attr": 0,
+                "owner_mid": 1,
+            },
+            "page": 1,
+            "page_size": 20,
+            "total": 3,
+            "total_pages": 1,
+            "has_more": False,
+            "items": [
+                {
+                    "item_id": "fav-video-1",
+                    "favorite_folder_id": "101",
+                    "item_type": 2,
+                    "media_type": 2,
+                    "selectable": True,
+                    "unsupported_reason": None,
+                    "video_id": "BV1SUB",
+                    "aid": 1001,
+                    "bvid": "BV1SUB",
+                    "title": "Subtitle Video",
+                    "cover": "https://img.example.test/sub.jpg",
+                    "intro": "has subtitle",
+                    "duration": 120,
+                    "upper_mid": 1,
+                    "upper_name": "tester",
+                    "fav_time": 1710000000,
+                    "pubtime": 1700000000,
+                },
+                {
+                    "item_id": "fav-article-1",
+                    "favorite_folder_id": "101",
+                    "item_type": 12,
+                    "media_type": 12,
+                    "selectable": False,
+                    "unsupported_reason": "Unsupported favorite item type: 12",
+                    "video_id": "article-1",
+                    "aid": None,
+                    "bvid": None,
+                    "title": "Unsupported Article",
+                    "cover": None,
+                    "intro": "unsupported",
+                    "duration": 0,
+                    "upper_mid": 1,
+                    "upper_name": "tester",
+                    "fav_time": 1710000010,
+                    "pubtime": 1700000010,
+                },
+                {
+                    "item_id": "fav-video-2",
+                    "favorite_folder_id": "101",
+                    "item_type": 2,
+                    "media_type": 2,
+                    "selectable": True,
+                    "unsupported_reason": None,
+                    "video_id": "BV1ASR",
+                    "aid": 1002,
+                    "bvid": "BV1ASR",
+                    "title": "ASR Video",
+                    "cover": "https://img.example.test/asr.jpg",
+                    "intro": "no subtitle",
+                    "duration": 180,
+                    "upper_mid": 1,
+                    "upper_name": "tester",
+                    "fav_time": 1710000020,
+                    "pubtime": 1700000020,
+                },
+            ],
+        }
+        self.video_views = {
+            "BV1SUB": {
+                "bvid": "BV1SUB",
+                "title": "Subtitle Video",
+                "subtitle": {"list": [{"lan": "zh-CN", "subtitle_url": "https://sub.example.test/1.json"}]},
+                "pages": [{"cid": 201, "page": 1, "part": "P1", "duration": 120}],
+            },
+            "BV1ASR": {
+                "bvid": "BV1ASR",
+                "title": "ASR Video",
+                "subtitle": {"list": []},
+                "pages": [{"cid": 202, "page": 1, "part": "P1", "duration": 180}],
+            },
+        }
+        self.subtitle_payload = {
+            "body": [
+                {"from": 0, "to": 1.2, "content": "rag basics"},
+                {"from": 1.2, "to": 2.5, "content": "vector indexing"},
+            ]
+        }
+        self.playurl_payloads = {
+            202: {
+                "dash": {
+                    "audio": [
+                        {
+                            "baseUrl": "https://media.example.test/audio-202.m4a",
+                        }
+                    ]
+                }
+            }
+        }
+        self.start_error: Exception | None = None
+        self.poll_error: Exception | None = None
+        self.folder_error: Exception | None = None
+        self.folder_items_error: Exception | None = None
+        self.calls: list[tuple[str, object]] = []
+
+    def start_qr_login(self) -> dict[str, object]:
+        self.calls.append(("start_qr_login", None))
+        if self.start_error:
+            raise self.start_error
+        return self.start_result
+
+    def poll_qr_login(self, qrcode_key: str) -> dict[str, object]:
+        self.calls.append(("poll_qr_login", qrcode_key))
+        if self.poll_error:
+            raise self.poll_error
+        return self.poll_result
+
+    def list_favorite_folders(self, cookie: str, *, folder_type: int = 2) -> dict[str, object]:
+        self.calls.append(("list_favorite_folders", {"cookie": cookie, "folder_type": folder_type}))
+        if self.folder_error:
+            raise self.folder_error
+        return self.folder_result
+
+    def list_folder_items(
+        self,
+        cookie: str,
+        favorite_folder_id: str,
+        *,
+        pn: int = 1,
+        ps: int = 20,
+        keyword: str = "",
+        order: str = "mtime",
+    ) -> dict[str, object]:
+        self.calls.append(
+            (
+                "list_folder_items",
+                {
+                    "cookie": cookie,
+                    "favorite_folder_id": favorite_folder_id,
+                    "pn": pn,
+                    "ps": ps,
+                    "keyword": keyword,
+                    "order": order,
+                },
+            )
+        )
+        if self.folder_items_error:
+            raise self.folder_items_error
+        return self.folder_items_result
+
+    def list_all_folder_items(
+        self,
+        cookie: str,
+        favorite_folder_id: str,
+        *,
+        keyword: str = "",
+        order: str = "mtime",
+    ) -> dict[str, object]:
+        self.calls.append(
+            (
+                "list_all_folder_items",
+                {
+                    "cookie": cookie,
+                    "favorite_folder_id": favorite_folder_id,
+                    "keyword": keyword,
+                    "order": order,
+                },
+            )
+        )
+        if self.folder_items_error:
+            raise self.folder_items_error
+        return self.folder_items_result
+
+    def get_video_view(
+        self,
+        cookie: str,
+        *,
+        bvid: str | None = None,
+        aid: int | None = None,
+    ) -> dict[str, object]:
+        self.calls.append(("get_video_view", {"cookie": cookie, "bvid": bvid, "aid": aid}))
+        key = bvid or str(aid)
+        return self.video_views[key]
+
+    def get_playurl(
+        self,
+        cookie: str,
+        *,
+        bvid: str,
+        cid: int,
+    ) -> dict[str, object]:
+        self.calls.append(("get_playurl", {"cookie": cookie, "bvid": bvid, "cid": cid}))
+        return self.playurl_payloads[cid]
+
+    def fetch_subtitle_body(self, subtitle_url: str, *, cookie: str | None = None) -> dict[str, object]:
+        self.calls.append(("fetch_subtitle_body", {"subtitle_url": subtitle_url, "cookie": cookie}))
+        return self.subtitle_payload
+
+    def choose_subtitle_entry(self, subtitles: list[dict[str, object]]) -> dict[str, object] | None:
+        self.calls.append(("choose_subtitle_entry", {"count": len(subtitles)}))
+        return subtitles[0] if subtitles else None
+
+    def subtitle_payload_to_blocks(self, payload: dict[str, object]) -> list[dict[str, object]]:
+        self.calls.append(("subtitle_payload_to_blocks", None))
+        return [
+            {
+                "text": str(item["content"]),
+                "start_ms": int(float(item["from"]) * 1000),
+                "end_ms": int(float(item["to"]) * 1000),
+                "block_index": index,
+            }
+            for index, item in enumerate(payload["body"])
+        ]
+
+
 def fake_embed_texts(texts: list[str]) -> list[list[float]]:
     return [[float(index)] for index, _ in enumerate(texts)]
 
@@ -185,7 +448,36 @@ def install_fake_knowledge_index(
         chunk_size=chunk_size,
         chunk_overlap=chunk_overlap,
     )
+    client.app.state.bilibili_import_pipeline = BilibiliImportPipeline(
+        repository=client.app.state.repository,
+        favorites_service=client.app.state.bilibili_favorite_folder_service,
+        knowledge_index=client.app.state.knowledge_index,
+        runtime_audit=client.app.state.runtime_audit,
+    )
+    client.app.state.bilibili_import_tool = build_bilibili_import_tool(
+        client.app.state.bilibili_import_pipeline
+    )
+    client.app.state.orchestrator.tools = build_tool_registry(client.app.state.bilibili_import_tool)
     return active_vector_index
+
+
+def install_fake_bilibili_favorite_folder_service(
+    client: TestClient,
+    service: FakeBilibiliFavoriteFolderService | None = None,
+) -> FakeBilibiliFavoriteFolderService:
+    active_service = service or FakeBilibiliFavoriteFolderService()
+    client.app.state.bilibili_favorite_folder_service = active_service
+    client.app.state.bilibili_import_pipeline = BilibiliImportPipeline(
+        repository=client.app.state.repository,
+        favorites_service=client.app.state.bilibili_favorite_folder_service,
+        knowledge_index=client.app.state.knowledge_index,
+        runtime_audit=client.app.state.runtime_audit,
+    )
+    client.app.state.bilibili_import_tool = build_bilibili_import_tool(
+        client.app.state.bilibili_import_pipeline
+    )
+    client.app.state.orchestrator.tools = build_tool_registry(client.app.state.bilibili_import_tool)
+    return active_service
 
 
 def test_general_chat_returns_completed_when_llm_is_unconfigured(tmp_path: Path) -> None:
@@ -573,9 +865,9 @@ def test_runtime_audit_records_planned_tools_and_tool_target(tmp_path: Path) -> 
         client.post(f"/api/runs/{run_id}/confirm", json={"approved": True})
 
     approval_span = next(span for span in runtime_audit.spans if span["name"] == "agent.approval_gate")
-    tool_span = next(span for span in runtime_audit.spans if span["name"] == "tool.bilibili_import.prepare_import_plan")
+    tool_span = next(span for span in runtime_audit.spans if span["name"] == "tool.bilibili_import.execute_import")
 
-    assert approval_span["run"].metadata["planned_tools"] == ["bilibili_import.prepare_import_plan"]
+    assert approval_span["run"].metadata["planned_tools"] == ["bilibili_import.execute_import"]
     assert tool_span["run"].metadata["tool_target"] == "favorite-folder-ingestion"
 
 
@@ -637,6 +929,360 @@ def test_langsmith_runtime_audit_redacts_secret_fields() -> None:
     assert sanitized["api_key"] == "<redacted>"
     assert sanitized["nested"]["cookie"] == "<redacted>"
     assert sanitized["nested"]["normal"].endswith("...<truncated>")
+
+
+def test_bilibili_qr_start_endpoint_returns_qr_payload(tmp_path: Path) -> None:
+    with build_client(tmp_path) as client:
+        service = install_fake_bilibili_favorite_folder_service(client)
+
+        response = client.post("/api/bilibili/auth/qr/start")
+
+        assert response.status_code == 200
+        body = response.json()
+        assert body["qrcode_key"] == "qr-key-1"
+        assert body["expires_in_seconds"] == 180
+        assert service.calls == [("start_qr_login", None)]
+
+
+def test_bilibili_qr_poll_endpoint_returns_cookie_and_account(tmp_path: Path) -> None:
+    with build_client(tmp_path) as client:
+        service = install_fake_bilibili_favorite_folder_service(client)
+
+        response = client.get("/api/bilibili/auth/qr/poll", params={"qrcode_key": "qr-key-1"})
+
+        assert response.status_code == 200
+        body = response.json()
+        assert body["status"] == "success"
+        assert body["cookie"] == "DedeUserID=1; SESSDATA=test"
+        assert body["account"]["uname"] == "tester"
+        assert service.calls == [("poll_qr_login", "qr-key-1")]
+
+
+def test_bilibili_favorite_folder_endpoint_returns_normalized_folders(tmp_path: Path) -> None:
+    with build_client(tmp_path) as client:
+        service = install_fake_bilibili_favorite_folder_service(client)
+
+        response = client.get(
+            "/api/bilibili/favorite-folders",
+            headers={"X-Bilibili-Cookie": "SESSDATA=test"},
+        )
+
+        assert response.status_code == 200
+        body = response.json()
+        assert body["account"]["uname"] == "tester"
+        assert body["total"] == 1
+        assert body["folders"][0]["favorite_folder_id"] == "101"
+        assert body["folders"][0]["media_count"] == 12
+        assert service.calls == [
+            ("list_favorite_folders", {"cookie": "SESSDATA=test", "folder_type": 2})
+        ]
+
+
+def test_bilibili_favorite_folder_endpoint_requires_cookie_header(tmp_path: Path) -> None:
+    with build_client(tmp_path) as client:
+        response = client.get("/api/bilibili/favorite-folders")
+
+        assert response.status_code == 401
+        assert "X-Bilibili-Cookie" in response.json()["detail"]
+
+
+def test_bilibili_favorite_folder_endpoint_returns_auth_error(tmp_path: Path) -> None:
+    with build_client(tmp_path) as client:
+        service = install_fake_bilibili_favorite_folder_service(client)
+        service.folder_error = BilibiliFavoriteFolderAuthError(
+            "Bilibili login state is invalid or expired. Please login again."
+        )
+
+        response = client.get(
+            "/api/bilibili/favorite-folders",
+            headers={"X-Bilibili-Cookie": "SESSDATA=expired"},
+        )
+
+        assert response.status_code == 401
+        assert "重新扫码登录" in response.json()["detail"]
+
+
+def test_bilibili_favorite_folder_videos_endpoint_returns_selectable_items(tmp_path: Path) -> None:
+    with build_client(tmp_path) as client:
+        service = install_fake_bilibili_favorite_folder_service(client)
+
+        response = client.get(
+            "/api/bilibili/favorite-folders/101/videos",
+            headers={"X-Bilibili-Cookie": "SESSDATA=test"},
+        )
+
+        assert response.status_code == 200
+        body = response.json()
+        assert body["folder"]["favorite_folder_id"] == "101"
+        assert body["total"] == 3
+        assert body["items"][0]["video_id"] == "BV1SUB"
+        assert body["items"][1]["selectable"] is False
+        assert "Unsupported favorite item type" in body["items"][1]["unsupported_reason"]
+        assert service.calls[0][0] == "list_folder_items"
+
+
+def test_submit_bilibili_import_runs_pipeline_and_records_asr_fallback(tmp_path: Path) -> None:
+    runtime_audit = FakeRuntimeAudit()
+    with build_client(tmp_path, runtime_audit=runtime_audit) as client:
+        install_fake_knowledge_index(client)
+        install_fake_bilibili_favorite_folder_service(client)
+
+        response = client.post(
+            "/api/bilibili/imports",
+            headers={"X-Bilibili-Cookie": "SESSDATA=test"},
+            json={
+                "favorite_folder_id": "101",
+                "selected_video_ids": ["BV1SUB", "BV1ASR"],
+            },
+        )
+
+        assert response.status_code == 202
+        body = response.json()
+        assert body["status"] == "running"
+        assert body["route"] == "import_request"
+        assert body["requires_confirmation"] is False
+        assert body["execution_plan"]["tool_calls"][0]["action"] == "execute_import"
+
+        run_detail = client.get(f"/api/runs/{body['run_id']}")
+        assert run_detail.status_code == 200
+        detail = run_detail.json()
+        assert detail["status"] == "completed"
+        assert "indexed=1" in detail["reply"]
+        assert "needs_asr=1" in detail["reply"]
+        assert detail["execution_plan"]["steps"][0]["status"] == "completed"
+
+        items = client.app.state.repository.get_import_run_items(body["run_id"])
+        assert [item["status"] for item in items] == ["needs_asr", "indexed"]
+        assert items[0]["needs_asr"] is True
+        assert items[0]["asr_job"]["pages"][0]["media_url"] == "https://media.example.test/audio-202.m4a"
+        assert items[1]["manifest"]["source_type"] == "subtitle"
+
+        event_types = [event["type"] for event in client.app.state.repository.get_run_events(body["run_id"])]
+        assert "import_started" in event_types
+        assert "import_index_completed" in event_types
+        assert event_types[-1] == "run_completed"
+
+        submit_trace = next(
+            request for request in runtime_audit.requests if request["name"] == "agent.submit_bilibili_import"
+        )
+        import_trace = next(
+            request for request in runtime_audit.requests if request["name"] == "agent.import_selected_videos"
+        )
+        assert submit_trace["metadata"]["run_id"] == body["run_id"]
+        assert import_trace["metadata"]["run_id"] == body["run_id"]
+
+
+def test_submit_bilibili_import_rejects_invalid_selection(tmp_path: Path) -> None:
+    with build_client(tmp_path) as client:
+        install_fake_knowledge_index(client)
+        install_fake_bilibili_favorite_folder_service(client)
+
+        response = client.post(
+            "/api/bilibili/imports",
+            headers={"X-Bilibili-Cookie": "SESSDATA=test"},
+            json={
+                "favorite_folder_id": "101",
+                "selected_video_ids": ["article-1"],
+            },
+        )
+
+        assert response.status_code == 400
+        assert "unsupported favorites" in response.json()["detail"]
+
+
+def test_submit_bilibili_import_skips_duplicate_knowledge_videos(tmp_path: Path) -> None:
+    with build_client(tmp_path) as client:
+        install_fake_knowledge_index(client)
+        install_fake_bilibili_favorite_folder_service(client)
+
+        first = client.post(
+            "/api/bilibili/imports",
+            headers={"X-Bilibili-Cookie": "SESSDATA=test"},
+            json={
+                "favorite_folder_id": "101",
+                "selected_video_ids": ["BV1SUB"],
+            },
+        )
+        assert first.status_code == 202
+
+        second = client.post(
+            "/api/bilibili/imports",
+            headers={"X-Bilibili-Cookie": "SESSDATA=test"},
+            json={
+                "favorite_folder_id": "101",
+                "selected_video_ids": ["BV1SUB"],
+            },
+        )
+
+        assert second.status_code == 202
+        detail = client.get(f"/api/runs/{second.json()['run_id']}")
+        assert detail.status_code == 200
+        assert "skipped_duplicate=1" in detail.json()["reply"]
+
+        items = client.app.state.repository.get_import_run_items(second.json()["run_id"])
+        assert items[0]["status"] == "skipped_duplicate"
+
+
+def test_manual_and_agent_import_share_same_bilibili_import_tool(tmp_path: Path) -> None:
+    with build_client(tmp_path) as client:
+        install_fake_knowledge_index(client)
+        install_fake_bilibili_favorite_folder_service(client)
+
+        agent_response = client.post("/api/chat", json={"message": "请帮我导入这个收藏夹"})
+        assert agent_response.status_code == 200
+        assert agent_response.json()["execution_plan"]["tool_calls"][0]["action"] == "execute_import"
+
+        shared_tool = client.app.state.bilibili_import_tool
+        assert client.app.state.orchestrator.tools[("bilibili_import", "execute_import")] is shared_tool
+
+
+def test_bilibili_qr_poll_service_parses_cookie_and_account() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/qrcode/poll"):
+            headers = [
+                ("set-cookie", "SESSDATA=token-1; Path=/; Domain=.bilibili.com; HttpOnly"),
+                ("set-cookie", "DedeUserID=42; Path=/; Domain=.bilibili.com"),
+            ]
+            return httpx.Response(
+                200,
+                headers=headers,
+                json={
+                    "code": 0,
+                    "data": {
+                        "code": 0,
+                        "message": "0",
+                        "refresh_token": "refresh-1",
+                    },
+                },
+            )
+        if request.url.path.endswith("/x/web-interface/nav"):
+            assert request.headers["cookie"] == "DedeUserID=42; SESSDATA=token-1"
+            return httpx.Response(
+                200,
+                json={"code": 0, "data": {"isLogin": True, "mid": 42, "uname": "alice"}},
+            )
+        raise AssertionError(f"Unexpected path: {request.url.path}")
+
+    service = BilibiliFavoriteFolderService(transport=httpx.MockTransport(handler))
+
+    result = service.poll_qr_login("qr-key-1")
+
+    assert result["status"] == "success"
+    assert result["cookie"] == "DedeUserID=42; SESSDATA=token-1"
+    assert result["account"]["uname"] == "alice"
+
+
+def test_bilibili_qr_poll_service_maps_pending_statuses() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={"code": 0, "data": {"code": 86101, "message": "Not scanned"}},
+        )
+
+    service = BilibiliFavoriteFolderService(transport=httpx.MockTransport(handler))
+
+    result = service.poll_qr_login("qr-key-1")
+
+    assert result["status"] == "pending_scan"
+    assert result["cookie"] is None
+
+
+def test_bilibili_favorite_folder_service_fetches_normalized_folders() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/x/web-interface/nav"):
+            return httpx.Response(
+                200,
+                json={"code": 0, "data": {"isLogin": True, "mid": 42, "uname": "alice"}},
+            )
+        if request.url.path.endswith("/x/v3/fav/folder/created/list-all"):
+            assert request.url.params["up_mid"] == "42"
+            assert request.url.params["type"] == "2"
+            return httpx.Response(
+                200,
+                json={
+                    "code": 0,
+                    "data": {
+                        "list": [
+                            {"id": 2, "title": "Folder B", "media_count": 5, "mid": 42, "attr": 0},
+                            {"id": 1, "title": "Folder A", "media_count": 8, "mid": 42, "attr": 0},
+                        ]
+                    },
+                },
+            )
+        if request.url.path.endswith("/x/v3/fav/folder/info"):
+            media_id = request.url.params["media_id"]
+            if media_id == "1":
+                return httpx.Response(
+                    200,
+                    json={
+                        "code": 0,
+                        "data": {
+                            "id": 1,
+                            "mid": 42,
+                            "title": "Folder A",
+                            "intro": "Alpha",
+                            "cover": "https://img/a.jpg",
+                            "attr": 0,
+                            "media_count": 8,
+                            "upper": {"mid": 42},
+                        },
+                    },
+                )
+            return httpx.Response(
+                200,
+                json={
+                    "code": 0,
+                    "data": {
+                        "id": 2,
+                        "mid": 42,
+                        "title": "Folder B",
+                        "intro": "Beta",
+                        "cover": "https://img/b.jpg",
+                        "attr": 1,
+                        "media_count": 5,
+                        "upper": {"mid": 42},
+                    },
+                },
+            )
+        raise AssertionError(f"Unexpected path: {request.url.path}")
+
+    service = BilibiliFavoriteFolderService(transport=httpx.MockTransport(handler))
+
+    result = service.list_favorite_folders("SESSDATA=test")
+
+    assert result["account"]["mid"] == 42
+    assert result["total"] == 2
+    assert [folder["favorite_folder_id"] for folder in result["folders"]] == ["1", "2"]
+
+
+def test_bilibili_favorite_folder_service_maps_auth_errors() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"code": -101, "message": "not login"})
+
+    service = BilibiliFavoriteFolderService(transport=httpx.MockTransport(handler))
+
+    with pytest.raises(BilibiliFavoriteFolderAuthError):
+        service.list_favorite_folders("SESSDATA=test")
+
+
+def test_bilibili_favorite_folder_service_raises_response_error_on_invalid_json() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, text="not-json")
+
+    service = BilibiliFavoriteFolderService(transport=httpx.MockTransport(handler))
+
+    with pytest.raises(BilibiliFavoriteFolderResponseError):
+        service.list_favorite_folders("SESSDATA=test")
+
+
+def test_bilibili_favorite_folder_service_maps_timeout_to_upstream_error() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ReadTimeout("timed out")
+
+    service = BilibiliFavoriteFolderService(transport=httpx.MockTransport(handler))
+
+    with pytest.raises(BilibiliFavoriteFolderUpstreamError):
+        service.start_qr_login()
 
 
 def build_knowledge_payload() -> dict[str, object]:

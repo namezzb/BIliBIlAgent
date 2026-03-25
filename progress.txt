@@ -199,3 +199,56 @@ Blockers:
 - None.
 Next step:
 - Implement the next unfinished feature in `feature_list.json`, which is `fav-folder-list`, unless priorities change.
+
+2026-03-25 21:15 CST
+Current goal: Implement `fav-folder-list` as the next unfinished P0 feature in `feature_list.json`, while reusing the `bilibili-fav-ingest` skill and LangChain tool abstractions.
+Completed:
+- Added a `BilibiliFavoriteFolderService` that reuses the `bilibili-fav-ingest` skill scripts instead of reimplementing Bilibili HTTP calls: `check_bili_cookie.py` for login validation, `list_fav_folders.py` for folder enumeration, and `export_folder_meta.py` for per-folder detail enrichment.
+- Wrapped favorite-folder listing in a LangChain `tool(args_schema=...)` so the API layer and future agent flows can share the same structured validation/execution path.
+- Added `POST /api/bilibili/favorite-folders` to return normalized folder list data with account summary, including `favorite_folder_id`, `title`, `intro`, `cover`, `media_count`, `folder_attr`, and `owner_mid`.
+- Added explicit error mapping for missing cookie/configuration, expired login state, missing skill scripts, invalid JSON, and upstream script failures.
+- Added settings/env support for `BILIBILI_FAV_INGEST_SKILL_DIR` and `BILI_COOKIE_FILE`, and documented the related placeholders in `.env.example`.
+- Extended automated tests to cover the new endpoint, LangChain tool reuse, script-runner integration path, and error handling.
+- Verified with `poetry run pytest tests/test_agent_api.py` (`36 passed`).
+In progress:
+- None.
+Blockers:
+- None.
+Next step:
+- Implement the next unfinished feature in `feature_list.json`, which is `fav-video-selection`.
+
+2026-03-25 22:10 CST
+Current goal: Replace the incorrect `fav-folder-list` implementation with the actual product flow: backend QR login bootstrap plus header-based Cookie reuse for Bilibili folder reads.
+Completed:
+- Removed the incorrect runtime dependency on `bilibili-fav-ingest` scripts and the body/env based Cookie input path for favorite-folder listing.
+- Added `POST /api/bilibili/auth/qr/start` to call Bilibili Web QR login generate API and return `qr_url`, `qrcode_key`, and a fixed 180-second expiry.
+- Added `GET /api/bilibili/auth/qr/poll` to map Bilibili QR poll states (`pending_scan`, `scanned_waiting_confirm`, `expired`, `success`), parse `Set-Cookie` headers on success, and return the raw Cookie string, refresh token, and account summary.
+- Reworked `GET /api/bilibili/favorite-folders` so the frontend must provide `X-Bilibili-Cookie`; the backend validates it with `/x/web-interface/nav`, then reads `/x/v3/fav/folder/created/list-all` and `/x/v3/fav/folder/info` directly via `httpx`.
+- Added explicit error mapping for missing Cookie header, expired login state, upstream transport failures, invalid upstream payloads, and missing `Set-Cookie` on successful login.
+- Removed the temporary Bilibili env placeholders from `.env.example` and the unused settings fields tied to the old script-based approach.
+- Replaced the old Bilibili tests with QR login start/poll endpoint coverage, header-based folder list tests, and direct service tests using `httpx.MockTransport`.
+- Verified with `poetry run pytest tests/test_agent_api.py` (`41 passed`).
+In progress:
+- None.
+Blockers:
+- None.
+Next step:
+- Implement `fav-video-selection` on top of the new header-based Bilibili login/session flow.
+
+2026-03-25 23:20 CST
+Current goal: Implement `fav-video-selection` as the next unfinished P0 feature, and fold the real import execution path into the same delivery so front-end selection can immediately trigger subtitle/ASR-aware ingestion.
+Completed:
+- Added `GET /api/bilibili/favorite-folders/{favorite_folder_id}/videos` to page through one favorite folder's items, normalize each item, and explicitly mark non-video resources as `selectable=false` with `unsupported_reason`.
+- Extended `BilibiliFavoriteFolderService` with folder-item enumeration, video `view` fetching, subtitle selection/download, subtitle flattening, and `playurl` fallback helpers based on direct Bilibili Web APIs.
+- Added `POST /api/bilibili/imports` as a dedicated front-end import submission endpoint that accepts `favorite_folder_id + selected_video_ids`, validates the selection against the current folder, creates an async `run`, and returns immediately with `run_id`.
+- Added `BilibiliImportPipeline` plus a LangChain structured tool for `bilibili_import.execute_selected_videos`, reusing the existing `run/run_steps/run_events/LangSmith` runtime layer instead of hand-rolling another execution system.
+- Implemented real import execution for selected videos: duplicate knowledge videos are skipped, subtitle-backed videos are transformed into `KnowledgeIndexService.index_documents(...)` payloads for chunking/vectorization, and per-video import state is persisted in the new `import_run_items` table.
+- Implemented the minimum `subtitle-asr-pipeline`: preferred subtitles are downloaded and flattened into knowledge text blocks; when subtitles are missing or fetch fails, the pipeline fetches `playurl`, marks `needs_asr=true`, and stores page-level ASR prep metadata in `import_run_items.asr_job_json`.
+- Expanded tests to cover favorite-folder video listing, import submission, async run completion, duplicate skip behavior, ASR fallback preparation, and the new fake dependency injection path for the import pipeline.
+- Verified with `poetry run pytest tests/test_agent_api.py` (`45 passed`).
+In progress:
+- None.
+Blockers:
+- None.
+Next step:
+- Implement `knowledge-retrieval`, now that selected-video import, subtitle text indexing, and ASR fallback preparation are all wired into the runtime import path.

@@ -267,9 +267,9 @@
     "dependencies": [
       "tool-execution-confirmation"
     ],
-    "passes": false,
+    "passes": true,
     "priority": "P0",
-    "notes": "默认采用 `bilibili-fav-ingest` skill 的 Web Cookie 方案。"
+    "notes": "已按正式产品链路重做：后端提供 `POST /api/bilibili/auth/qr/start` 与 `GET /api/bilibili/auth/qr/poll` 供前端完成 B 站 Web 端扫码登录，轮询成功后返回原始 Cookie 串、refresh token 和账号摘要，由前端自行保存。收藏夹列表接口改为 `GET /api/bilibili/favorite-folders`，要求前端通过 `X-Bilibili-Cookie` 请求头传入当前登录态；后端直接调用 B 站 `nav`、`created/list-all` 和 `folder/info` 接口读取并标准化收藏夹数据。`bilibili-fav-ingest` skill 仅保留为开发参考，不再作为运行时实现。"
   },
   {
     "id": "fav-video-selection",
@@ -301,9 +301,9 @@
     "dependencies": [
       "fav-folder-list"
     ],
-    "passes": false,
+    "passes": true,
     "priority": "P0",
-    "notes": "参考 `bilibili-fav-ingest` skill"
+    "notes": "已提供 `GET /api/bilibili/favorite-folders/{favorite_folder_id}/videos`：前端传 `X-Bilibili-Cookie` 后可分页读取收藏夹收藏项，返回标准化视频/非视频条目，并用 `selectable=false + unsupported_reason` 显式标记不支持导入的非视频资源。提交导入时使用前端显式勾选的 `selected_video_ids`，支持部分导入，不再强制整夹导入。"
   },
   {
     "id": "bilibili-import-execution",
@@ -338,9 +338,9 @@
       "knowledge-memory-index",
       "runtime-memory-audit"
     ],
-    "passes": false,
+    "passes": true,
     "priority": "P0",
-    "notes": "参考 `bilibili-fav-ingest` skill"
+    "notes": "已提供 `POST /api/bilibili/imports` 专用导入接口：前端传 `favorite_folder_id + selected_video_ids` 与 `X-Bilibili-Cookie` 后，后端创建异步 `run` 并在后台执行真实导入。导入流程会校验所选视频属于当前收藏夹、拉取视频详情、复用 LangChain structured tool 执行管线、写入 `run_steps/run_events` 与 `import_run_items`，并将有字幕的视频直接送入现有 `KnowledgeIndexService` 做切片和向量化；已存在于知识库的视频会标记为 `skipped_duplicate`。"
   },
   {
     "id": "subtitle-asr-pipeline",
@@ -373,9 +373,9 @@
     "dependencies": [
       "bilibili-import-execution"
     ],
-    "passes": false,
+    "passes": true,
     "priority": "P0",
-    "notes": "字幕优先级默认 `zh-CN/zh-Hans`，其次任意中文。"
+    "notes": "已在导入链路中落地字幕优先级 `zh-CN/zh-Hans` > 其他中文 > 首个可用字幕。命中字幕时会下载字幕 JSON、清洗为文本块并以 `source_type=subtitle` 进入知识库；无字幕或字幕抓取失败时不会静默跳过，而是为每个分页补抓 `playurl` 候选、标记 `needs_asr=true`、生成 ASR 预备任务信息并持久化到 `import_run_items.asr_job_json`，供后续真实 ASR 工具链接入。"
   },
   {
     "id": "knowledge-retrieval",

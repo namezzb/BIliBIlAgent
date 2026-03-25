@@ -3,10 +3,13 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from langsmith.middleware import TracingMiddleware
 
+from app.agent.tools import build_bilibili_import_tool, build_tool_registry
 from app.agent.service import AgentOrchestrator
 from app.api.routes.chat import router as chat_router
 from app.core.config import Settings, get_settings
 from app.db.repository import SQLiteRepository
+from app.services.bilibili_favorites import BilibiliFavoriteFolderService
+from app.services.bilibili_import import BilibiliImportPipeline
 from app.services.knowledge_index import ChromaVectorIndex, KnowledgeIndexService
 from app.services.llm import OpenAICompatibleLLM
 from app.services.runtime_audit import LangSmithRuntimeAudit
@@ -39,6 +42,7 @@ async def lifespan(app: FastAPI):
         runtime_audit=runtime_audit,
     )
     user_memory = UserMemoryManager(repository)
+    bilibili_favorites = BilibiliFavoriteFolderService()
     knowledge_index = KnowledgeIndexService(
         repository=repository,
         vector_index=ChromaVectorIndex(
@@ -51,12 +55,20 @@ async def lifespan(app: FastAPI):
         chunk_size=settings.knowledge_chunk_size,
         chunk_overlap=settings.knowledge_chunk_overlap,
     )
+    bilibili_import_pipeline = BilibiliImportPipeline(
+        repository=repository,
+        favorites_service=bilibili_favorites,
+        knowledge_index=knowledge_index,
+        runtime_audit=runtime_audit,
+    )
+    bilibili_import_tool = build_bilibili_import_tool(bilibili_import_pipeline)
     orchestrator = AgentOrchestrator(
         repository=repository,
         llm=llm,
         checkpoint_db_path=settings.checkpoint_db_path,
         user_memory=user_memory,
         runtime_audit=runtime_audit,
+        tool_registry=build_tool_registry(bilibili_import_tool),
     )
     session_memory = SessionMemoryManager(repository, llm)
 
@@ -64,6 +76,9 @@ async def lifespan(app: FastAPI):
     app.state.orchestrator = orchestrator
     app.state.session_memory = session_memory
     app.state.user_memory = user_memory
+    app.state.bilibili_favorite_folder_service = bilibili_favorites
+    app.state.bilibili_import_pipeline = bilibili_import_pipeline
+    app.state.bilibili_import_tool = bilibili_import_tool
     app.state.knowledge_index = knowledge_index
     app.state.runtime_audit = runtime_audit
 

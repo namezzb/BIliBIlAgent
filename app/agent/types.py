@@ -26,6 +26,10 @@ RunEventType = Literal[
     "confirmation_resolved",
     "tool_execution_started",
     "tool_execution_finished",
+    "import_started",
+    "import_selection_validated",
+    "import_item_processed",
+    "import_index_completed",
     "run_completed",
     "run_failed",
 ]

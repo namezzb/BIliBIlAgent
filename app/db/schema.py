@@ -66,6 +66,29 @@ SCHEMA_STATEMENTS = [
     )
     """,
     """
+    CREATE TABLE IF NOT EXISTS import_run_items (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        run_id TEXT NOT NULL,
+        favorite_folder_id TEXT NOT NULL,
+        video_id TEXT NOT NULL,
+        bvid TEXT,
+        title TEXT NOT NULL,
+        status TEXT NOT NULL,
+        needs_asr INTEGER NOT NULL DEFAULT 0,
+        failure_reason TEXT,
+        retryable INTEGER NOT NULL DEFAULT 0,
+        manifest_json TEXT,
+        asr_job_json TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        UNIQUE(run_id, video_id)
+    )
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_import_run_items_run_id
+    ON import_run_items (run_id)
+    """,
+    """
     CREATE TABLE IF NOT EXISTS user_memory_profiles (
         user_id TEXT PRIMARY KEY,
         profile_json TEXT NOT NULL,
