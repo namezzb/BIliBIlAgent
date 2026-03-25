@@ -1,6 +1,7 @@
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
+from langsmith.middleware import TracingMiddleware
 
 from app.agent.service import AgentOrchestrator
 from app.api.routes.chat import router as chat_router
@@ -8,6 +9,7 @@ from app.core.config import Settings, get_settings
 from app.db.repository import SQLiteRepository
 from app.services.knowledge_index import ChromaVectorIndex, KnowledgeIndexService
 from app.services.llm import OpenAICompatibleLLM
+from app.services.runtime_audit import LangSmithRuntimeAudit
 from app.services.session_memory import SessionMemoryManager
 from app.services.user_memory import UserMemoryManager
 
@@ -17,6 +19,16 @@ async def lifespan(app: FastAPI):
     settings: Settings = app.state.settings
     repository = SQLiteRepository(settings.app_db_path)
     repository.initialize()
+    runtime_audit = app.state.runtime_audit or LangSmithRuntimeAudit(
+        enabled=settings.langsmith_tracing,
+        api_key=settings.langsmith_api_key,
+        project_name=settings.langsmith_project,
+        endpoint=settings.langsmith_endpoint,
+        workspace_id=settings.langsmith_workspace_id,
+        web_url=settings.langsmith_web_url,
+        app_name=settings.app_name,
+        environment=settings.environment,
+    )
     llm = OpenAICompatibleLLM(
         api_key=settings.llm_api_key,
         base_url=settings.llm_base_url,
@@ -24,6 +36,7 @@ async def lifespan(app: FastAPI):
         summary_model=settings.summary_model,
         embedding_model=settings.embedding_model,
         system_prompt=settings.llm_system_prompt,
+        runtime_audit=runtime_audit,
     )
     user_memory = UserMemoryManager(repository)
     knowledge_index = KnowledgeIndexService(
@@ -43,6 +56,7 @@ async def lifespan(app: FastAPI):
         llm=llm,
         checkpoint_db_path=settings.checkpoint_db_path,
         user_memory=user_memory,
+        runtime_audit=runtime_audit,
     )
     session_memory = SessionMemoryManager(repository, llm)
 
@@ -51,14 +65,20 @@ async def lifespan(app: FastAPI):
     app.state.session_memory = session_memory
     app.state.user_memory = user_memory
     app.state.knowledge_index = knowledge_index
+    app.state.runtime_audit = runtime_audit
 
     try:
         yield
     finally:
         orchestrator.close()
+        runtime_audit.close()
 
 
-def create_app(settings: Settings | None = None) -> FastAPI:
+def create_app(
+    settings: Settings | None = None,
+    *,
+    runtime_audit: LangSmithRuntimeAudit | None = None,
+) -> FastAPI:
     app_settings = settings or get_settings()
     app_settings.ensure_directories()
 
@@ -69,6 +89,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         lifespan=lifespan,
     )
     app.state.settings = app_settings
+    app.state.runtime_audit = runtime_audit
+    app.add_middleware(TracingMiddleware)
     app.include_router(chat_router)
 
     @app.get("/")

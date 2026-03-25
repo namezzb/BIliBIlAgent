@@ -21,6 +21,8 @@ class ChatResponse(BaseModel):
     run_id: str
     intent: str | None = None
     route: str | None = None
+    langsmith_thread_id: str | None = None
+    langsmith_thread_url: str | None = None
     status: str
     reply: str
     requires_confirmation: bool = False

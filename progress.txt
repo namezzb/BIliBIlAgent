@@ -165,3 +165,20 @@ Blockers:
 - None.
 Next step:
 - Implement `runtime-memory-audit` or continue directly into `knowledge-retrieval`, depending on whether we want to prioritize richer runtime traceability or first connect knowledge queries to the new index.
+
+2026-03-25 18:45 CST
+Current goal: Implement `runtime-memory-audit` as the next unfinished P0 feature in `feature_list.json`, using LangSmith as the required primary observability backend.
+Completed:
+- Added mandatory LangSmith runtime-audit configuration (`LANGSMITH_TRACING`, `LANGSMITH_API_KEY`, `LANGSMITH_PROJECT`, optional endpoint/workspace/web URL) and startup validation in the FastAPI lifespan.
+- Introduced `LangSmithRuntimeAudit` to manage request-level traces, step/tool spans, LangSmith thread references, client flush on shutdown, and basic secret/truncation redaction.
+- Wired `TracingMiddleware` into the ASGI app and wrapped the OpenAI-compatible client with `wrap_openai(...)` so chat, summary, and embedding calls participate in the active LangSmith trace.
+- Instrumented the agent orchestration lifecycle (`/api/chat`, `/api/runs/{run_id}/confirm`, context loading, intent classification, planning, approval, placeholder tool execution, finalization) with LangSmith trace/span contexts while preserving local `run_steps` and `run_events`.
+- Extended the `runs` store and API responses with `langsmith_thread_id` / `langsmith_thread_url`, and added failure-path persistence so unexpected runtime errors still mark the local run as failed with a traceable summary.
+- Updated `.env.example`, added a focused test double for runtime audit injection, and expanded the test suite to cover LangSmith startup enforcement, thread reference exposure, failure persistence, and redaction behavior.
+- Verified the full backend suite with `poetry run pytest` (`27 passed`).
+In progress:
+- None.
+Blockers:
+- None.
+Next step:
+- Implement `tool-execution-confirmation` or start connecting `knowledge-retrieval`, depending on whether confirmation UX depth or retrieval functionality should be prioritized next.

@@ -24,6 +24,7 @@ class SQLiteRepository:
             self._ensure_sessions_user_id_column(connection)
             self._ensure_sessions_memory_columns(connection)
             self._ensure_runs_route_column(connection)
+            self._ensure_runs_langsmith_columns(connection)
             self._ensure_knowledge_text_chunks_video_schema(connection)
             connection.commit()
 
@@ -46,6 +47,14 @@ class SQLiteRepository:
         columns = {row["name"] for row in rows}
         if "route" not in columns:
             connection.execute("ALTER TABLE runs ADD COLUMN route TEXT")
+
+    def _ensure_runs_langsmith_columns(self, connection: sqlite3.Connection) -> None:
+        rows = connection.execute("PRAGMA table_info(runs)").fetchall()
+        columns = {row["name"] for row in rows}
+        if "langsmith_thread_id" not in columns:
+            connection.execute("ALTER TABLE runs ADD COLUMN langsmith_thread_id TEXT")
+        if "langsmith_thread_url" not in columns:
+            connection.execute("ALTER TABLE runs ADD COLUMN langsmith_thread_url TEXT")
 
     def _ensure_knowledge_text_chunks_video_schema(self, connection: sqlite3.Connection) -> None:
         rows = connection.execute("PRAGMA table_info(knowledge_text_chunks)").fetchall()
@@ -226,6 +235,8 @@ class SQLiteRepository:
         *,
         intent: str | None = None,
         route: str | None = None,
+        langsmith_thread_id: str | None = None,
+        langsmith_thread_url: str | None = None,
         status: str | None = None,
         requires_confirmation: bool | None = None,
         approval_status: str | None = None,
@@ -241,6 +252,12 @@ class SQLiteRepository:
         if route is not None:
             assignments.append("route = ?")
             values.append(route)
+        if langsmith_thread_id is not None:
+            assignments.append("langsmith_thread_id = ?")
+            values.append(langsmith_thread_id)
+        if langsmith_thread_url is not None:
+            assignments.append("langsmith_thread_url = ?")
+            values.append(langsmith_thread_url)
         if status is not None:
             assignments.append("status = ?")
             values.append(status)
@@ -269,7 +286,8 @@ class SQLiteRepository:
         with self._connect() as connection:
             row = connection.execute(
                 """
-                SELECT run_id, session_id, intent, route, status, requires_confirmation,
+                SELECT run_id, session_id, intent, route, langsmith_thread_id,
+                       langsmith_thread_url, status, requires_confirmation,
                        approval_status, latest_reply, pending_actions_json,
                        created_at, updated_at
                 FROM runs

@@ -197,8 +197,9 @@
     "dependencies": [
       "agent-orchestration"
     ],
-    "passes": false,
-    "priority": "P0"
+    "passes": true,
+    "priority": "P0",
+    "notes": "已将 `runtime-memory-audit` 升级为 `LangSmith + 本地运行状态` 双层方案：LangSmith 作为必需的主审计面，记录每次 `/api/chat` 与 `/api/runs/{run_id}/confirm` 的请求级 trace，以及上下文加载、意图分类、规划、审批、工具执行、收尾等步骤级 span；OpenAI 兼容模型调用通过 `wrap_openai(...)` 自动纳入追踪。SQLite 继续保留 `runs/run_steps/run_events` 作为应用控制面与兼容读接口，并新增 `langsmith_thread_id/langsmith_thread_url` 供 API 返回外部审计入口；同时补充启动期 LangSmith 强校验、失败回写本地 run 状态与基础敏感字段脱敏。"
   },
   {
     "id": "tool-execution-confirmation",

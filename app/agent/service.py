@@ -9,6 +9,7 @@ from app.agent.events import aggregate_chat_response
 from app.agent.types import AgentState, IntentType, PendingAction, RouteType
 from app.db.repository import SQLiteRepository
 from app.services.llm import OpenAICompatibleLLM
+from app.services.runtime_audit import LangSmithRuntimeAudit
 from app.services.user_memory import UserMemoryManager
 
 
@@ -19,10 +20,12 @@ class AgentOrchestrator:
         llm: OpenAICompatibleLLM,
         checkpoint_db_path: Path,
         user_memory: UserMemoryManager,
+        runtime_audit: LangSmithRuntimeAudit,
     ) -> None:
         self.repository = repository
         self.llm = llm
         self.user_memory = user_memory
+        self.runtime_audit = runtime_audit
         self._checkpointer_cm = SqliteSaver.from_conn_string(str(checkpoint_db_path))
         self.checkpointer = self._checkpointer_cm.__enter__()
         self.graph = self._build_graph()
@@ -42,41 +45,103 @@ class AgentOrchestrator:
         recent_context: dict[str, object] | None = None,
         user_memory_context: str | None = None,
     ) -> dict[str, Any]:
-        self._emit_event(
-            run_id,
-            "run_started",
-            {
+        request_metadata = {
+            "thread_id": run_id,
+            "run_id": run_id,
+            "session_id": session_id,
+            "user_id": user_id,
+            "environment": self.runtime_audit.environment,
+            "app_name": self.runtime_audit.app_name,
+            "operation": "chat",
+        }
+        request_tags = ["agent", "chat", self.runtime_audit.environment]
+        with self.runtime_audit.trace_request(
+            name="agent.chat",
+            inputs={
                 "session_id": session_id,
-                "user_id": user_id,
-                "message": message,
-            },
-        )
-        self.graph.invoke(
-            {
-                "session_id": session_id,
-                "user_id": user_id,
                 "run_id": run_id,
-                "current_message": message,
-                "messages": messages,
-                "session_summary": session_summary,
-                "recent_context": recent_context or {},
-                "user_memory_context": user_memory_context,
-                "status": "running",
-                "requires_confirmation": False,
-                "pending_actions": [],
+                "message": message,
+                "message_count": len(messages),
             },
-            config={"configurable": {"thread_id": run_id}},
-        )
-        return self._build_sync_response(run_id, session_id)
+            metadata=request_metadata,
+            tags=request_tags,
+        ) as trace_run:
+            self._emit_event(
+                run_id,
+                "run_started",
+                {
+                    "session_id": session_id,
+                    "user_id": user_id,
+                    "message": message,
+                },
+            )
+            self.graph.invoke(
+                {
+                    "session_id": session_id,
+                    "user_id": user_id,
+                    "run_id": run_id,
+                    "current_message": message,
+                    "messages": messages,
+                    "session_summary": session_summary,
+                    "recent_context": recent_context or {},
+                    "user_memory_context": user_memory_context,
+                    "status": "running",
+                    "requires_confirmation": False,
+                    "pending_actions": [],
+                },
+                config={"configurable": {"thread_id": run_id}},
+            )
+            result = self._build_sync_response(run_id, session_id)
+            trace_run.add_metadata(
+                {
+                    "intent": result.get("intent"),
+                    "route": result.get("route"),
+                    "status": result.get("status"),
+                    "approval_status": result.get("approval_status"),
+                }
+            )
+            trace_run.end(outputs=self.runtime_audit.sanitize_payload(result))
+            result.update(self.runtime_audit.build_reference(run_id=run_id, trace_run=trace_run))
+            return result
 
     def resume_run(self, run_id: str, approved: bool) -> dict[str, Any]:
-        self.graph.invoke(
-            Command(resume={"approved": approved}),
-            config={"configurable": {"thread_id": run_id}},
-        )
         run = self.repository.get_run(run_id)
         session_id = run["session_id"] if run is not None else ""
-        return self._build_sync_response(run_id, session_id)
+        user_id = None
+        if run is not None:
+            session = self.repository.get_session(session_id)
+            user_id = session["user_id"] if session is not None else None
+
+        with self.runtime_audit.trace_request(
+            name="agent.confirm_run",
+            inputs={"run_id": run_id, "approved": approved},
+            metadata={
+                "thread_id": run_id,
+                "run_id": run_id,
+                "session_id": session_id,
+                "user_id": user_id,
+                "environment": self.runtime_audit.environment,
+                "app_name": self.runtime_audit.app_name,
+                "operation": "confirm",
+            },
+            tags=["agent", "confirm", self.runtime_audit.environment],
+        ) as trace_run:
+            self.graph.invoke(
+                Command(resume={"approved": approved}),
+                config={"configurable": {"thread_id": run_id}},
+            )
+            result = self._build_sync_response(run_id, session_id)
+            trace_run.add_metadata(
+                {
+                    "intent": result.get("intent"),
+                    "route": result.get("route"),
+                    "status": result.get("status"),
+                    "approval_status": result.get("approval_status"),
+                }
+            )
+            trace_run.end(outputs=self.runtime_audit.sanitize_payload(result))
+            result.update(self.runtime_audit.build_reference(run_id=run_id, trace_run=trace_run))
+            return result
 
     def _build_graph(self):
         builder = StateGraph(AgentState)
@@ -130,262 +195,321 @@ class AgentOrchestrator:
         return "finalize_run"
 
     def _load_context(self, state: AgentState) -> dict[str, Any]:
-        self.repository.upsert_run_step(
-            state["run_id"],
-            "load_context",
-            "load_context",
-            "completed",
-            input_summary="load session history",
-            output_summary=(
+        with self.runtime_audit.trace_span(
+            name="agent.load_context",
+            run_type="chain",
+            inputs={
+                "run_id": state["run_id"],
+                "message_count": len(state.get("messages", [])),
+                "recent_context": state.get("recent_context", {}),
+            },
+            metadata=self._span_metadata(state),
+            tags=["agent", "context"],
+        ) as trace_run:
+            output_summary = (
                 f"loaded {len(state.get('messages', []))} messages; "
                 f"user_memory_present={bool(state.get('user_memory_context'))}"
-            ),
-        )
-        self._emit_event(
-            state["run_id"],
-            "context_loaded",
-            {
+            )
+            self.repository.upsert_run_step(
+                state["run_id"],
+                "load_context",
+                "load_context",
+                "completed",
+                input_summary="load session history",
+                output_summary=output_summary,
+            )
+            payload = {
                 "message_count": len(state.get("messages", [])),
                 "summary_present": bool(state.get("session_summary")),
                 "recent_context_available": bool(state.get("recent_context")),
                 "user_memory_present": bool(state.get("user_memory_context")),
-            },
-        )
-        return {}
+            }
+            self._emit_event(state["run_id"], "context_loaded", payload)
+            result: dict[str, Any] = {}
+            trace_run.end(outputs={"event": payload, "result": result})
+            return result
 
     def _classify_intent(self, state: AgentState) -> dict[str, Any]:
-        route = self._detect_route(state["current_message"])
-        intent = self._intent_from_route(route)
-        self.repository.upsert_run_step(
-            state["run_id"],
-            "classify_intent",
-            "classify_intent",
-            "completed",
-            input_summary=state["current_message"],
-            output_summary=f"{route} -> {intent}",
-        )
-        self._emit_event(
-            state["run_id"],
-            "intent_classified",
-            {
+        with self.runtime_audit.trace_span(
+            name="agent.classify_intent",
+            run_type="chain",
+            inputs={
+                "run_id": state["run_id"],
+                "message": state["current_message"],
+            },
+            metadata=self._span_metadata(state),
+            tags=["agent", "routing"],
+        ) as trace_run:
+            route = self._detect_route(state["current_message"])
+            intent = self._intent_from_route(route)
+            self.repository.upsert_run_step(
+                state["run_id"],
+                "classify_intent",
+                "classify_intent",
+                "completed",
+                input_summary=state["current_message"],
+                output_summary=f"{route} -> {intent}",
+            )
+            payload = {
                 "intent": intent,
                 "route": route,
                 "message": state["current_message"],
-            },
-        )
-        return {"intent": intent, "route": route}
+            }
+            self._emit_event(state["run_id"], "intent_classified", payload)
+            result = {"intent": intent, "route": route}
+            trace_run.end(outputs={"event": payload, "result": result})
+            return result
 
     def _plan_or_answer(self, state: AgentState) -> dict[str, Any]:
-        intent = state["intent"]
-        route = state["route"]
+        with self.runtime_audit.trace_span(
+            name="agent.plan_or_answer",
+            run_type="chain",
+            inputs={
+                "run_id": state["run_id"],
+                "intent": state["intent"],
+                "route": state["route"],
+                "message": state["current_message"],
+            },
+            metadata=self._span_metadata(state),
+            tags=["agent", "planning"],
+        ) as trace_run:
+            intent = state["intent"]
+            route = state["route"]
 
-        #命中导入,重试
-        if route in {"import_request", "retry_request"}:
-            pending_actions = self._build_pending_actions(route, state["current_message"])
-            response = (
-                "This request needs confirmation before execution. Review the planned "
-                "actions and call the confirmation endpoint to continue."
-            )
+            if route in {"import_request", "retry_request"}:
+                pending_actions = self._build_pending_actions(route, state["current_message"])
+                response = (
+                    "This request needs confirmation before execution. Review the planned "
+                    "actions and call the confirmation endpoint to continue."
+                )
+                self.repository.upsert_run_step(
+                    state["run_id"],
+                    "plan_or_answer",
+                    "plan_or_answer",
+                    "completed",
+                    input_summary=intent,
+                    output_summary="prepared execution plan",
+                )
+                payload = {
+                    "intent": intent,
+                    "route": route,
+                    "reply": response,
+                    "pending_actions": pending_actions,
+                }
+                self._emit_event(state["run_id"], "response_prepared", payload)
+                result = {
+                    "pending_actions": pending_actions,
+                    "requires_confirmation": True,
+                    "status": "awaiting_confirmation",
+                    "response": response,
+                }
+                trace_run.end(outputs={"event": payload, "result": result})
+                return result
+
+            if self.user_memory.is_chat_command(state["current_message"]):
+                user_id = state.get("user_id")
+                if not user_id:
+                    response = "长期记忆操作需要显式传入 user_id。"
+                else:
+                    response = self.user_memory.apply_chat_command(
+                        user_id,
+                        state["current_message"],
+                        state["run_id"],
+                    )
+            elif route == "favorite_knowledge_query":
+                response = (
+                    "Favorite-folder knowledge query is recognized, but the retrieval chain "
+                    "is not connected yet."
+                )
+            elif route == "video_knowledge_query":
+                response = (
+                    "Single-video knowledge query is recognized, but the retrieval chain "
+                    "is not connected yet."
+                )
+            else:
+                extra_system_messages = []
+                if state.get("user_memory_context"):
+                    extra_system_messages.append(str(state["user_memory_context"]))
+                response = self.llm.chat(
+                    state.get("messages", []),
+                    extra_system_messages=extra_system_messages,
+                )
+
             self.repository.upsert_run_step(
                 state["run_id"],
                 "plan_or_answer",
                 "plan_or_answer",
                 "completed",
                 input_summary=intent,
-                output_summary="prepared execution plan",
+                output_summary="generated direct response",
             )
-            self._emit_event(
-                state["run_id"],
-                "response_prepared",
-                {
-                    "intent": intent,
-                    "route": route,
-                    "reply": response,
-                    "pending_actions": pending_actions,
-                },
-            )
-            return {
-                "pending_actions": pending_actions,
-                "requires_confirmation": True,
-                "status": "awaiting_confirmation",
-                "response": response,
-            }
-
-
-        #命中保存记忆的操作
-        if self.user_memory.is_chat_command(state["current_message"]):
-            user_id = state.get("user_id")
-            if not user_id:
-                response = "长期记忆操作需要显式传入 user_id。"
-            else:
-                response = self.user_memory.apply_chat_command(
-                    user_id,
-                    state["current_message"],
-                    state["run_id"],
-                )
-        #命中收藏夹检索
-        elif route == "favorite_knowledge_query":
-            response = (
-                "Favorite-folder knowledge query is recognized, but the retrieval chain "
-                "is not connected yet."
-            )
-
-        #命中具体视频信息解释
-        elif route == "video_knowledge_query":
-            response = (
-                "Single-video knowledge query is recognized, but the retrieval chain "
-                "is not connected yet."
-            )
-
-        #普通回答
-        else:
-            extra_system_messages = []
-            if state.get("user_memory_context"):
-                extra_system_messages.append(str(state["user_memory_context"]))
-            response = self.llm.chat(
-                state.get("messages", []),
-                extra_system_messages=extra_system_messages,
-            )
-
-        self.repository.upsert_run_step(
-            state["run_id"],
-            "plan_or_answer",
-            "plan_or_answer",
-            "completed",
-            input_summary=intent,
-            output_summary="generated direct response",
-        )
-        self._emit_event(
-            state["run_id"],
-            "response_prepared",
-            {
+            payload = {
                 "intent": intent,
                 "route": route,
                 "reply": response,
                 "pending_actions": [],
-            },
-        )
-        return {
-            "requires_confirmation": False,
-            "status": "completed",
-            "response": response,
-        }
+            }
+            self._emit_event(state["run_id"], "response_prepared", payload)
+            result = {
+                "requires_confirmation": False,
+                "status": "completed",
+                "response": response,
+            }
+            trace_run.end(outputs={"event": payload, "result": result})
+            return result
 
     def _approval_gate(self, state: AgentState) -> dict[str, Any]:
-        payload = {
-            "run_id": state["run_id"],
-            "question": "Approve execution of the planned tool actions?",
-            "pending_actions": state.get("pending_actions", []),
-        }
-        self.repository.upsert_run_step(
-            state["run_id"],
-            "approval_pending",
-            "approval_gate",
-            "awaiting_confirmation",
-            input_summary="user approval required",
-            output_summary="waiting for confirmation",
-        )
-
-        self._emit_event(
-            state["run_id"],
-            "confirmation_required",
-            {
-                "question": payload["question"],
+        with self.runtime_audit.trace_span(
+            name="agent.approval_gate",
+            run_type="chain",
+            inputs={
+                "run_id": state["run_id"],
                 "route": state.get("route"),
-                "pending_actions": payload["pending_actions"],
-                "reply": state.get("response", ""),
+                "pending_actions": state.get("pending_actions", []),
             },
-        )
-        decision = interrupt(payload)
-        approved = self._is_approved(decision)
-        approval_status = "approved" if approved else "rejected"
-        self.repository.upsert_run_step(
-            state["run_id"],
-            "approval_decision",
-            "approval_gate",
-            "completed",
-            input_summary="received confirmation decision",
-            output_summary=approval_status,
-        )
+            metadata=self._span_metadata(state),
+            tags=["agent", "approval"],
+        ) as trace_run:
+            payload = {
+                "run_id": state["run_id"],
+                "question": "Approve execution of the planned tool actions?",
+                "pending_actions": state.get("pending_actions", []),
+            }
+            self.repository.upsert_run_step(
+                state["run_id"],
+                "approval_pending",
+                "approval_gate",
+                "awaiting_confirmation",
+                input_summary="user approval required",
+                output_summary="waiting for confirmation",
+            )
 
-        # 批准后
-        self._emit_event(
-            state["run_id"],
-            "confirmation_resolved",
-            {
-                "approved": approved,
-                "route": state.get("route"),
-                "reply": (
-                    state.get("response", "")
-                    if approved
-                    else "Execution was cancelled. No side-effectful tool was run."
-                ),
-            },
-        )
-        return {
-            "approval_status": approval_status,
-            "status": "running" if approved else "cancelled",
-            "response": (
+            self._emit_event(
+                state["run_id"],
+                "confirmation_required",
+                {
+                    "question": payload["question"],
+                    "route": state.get("route"),
+                    "pending_actions": payload["pending_actions"],
+                    "reply": state.get("response", ""),
+                },
+            )
+            decision = interrupt(payload)
+            approved = self._is_approved(decision)
+            approval_status = "approved" if approved else "rejected"
+            self.repository.upsert_run_step(
+                state["run_id"],
+                "approval_decision",
+                "approval_gate",
+                "completed",
+                input_summary="received confirmation decision",
+                output_summary=approval_status,
+            )
+
+            reply = (
                 state.get("response", "")
                 if approved
                 else "Execution was cancelled. No side-effectful tool was run."
-            ),
-        }
+            )
+            payload = {
+                "approved": approved,
+                "route": state.get("route"),
+                "reply": reply,
+            }
+            self._emit_event(state["run_id"], "confirmation_resolved", payload)
+            result = {
+                "approval_status": approval_status,
+                "status": "running" if approved else "cancelled",
+                "response": reply,
+            }
+            trace_run.end(outputs={"event": payload, "result": result})
+            return result
 
     def _execute_placeholder(self, state: AgentState) -> dict[str, Any]:
-        response = (
-            "Execution was approved. The tool pipeline placeholder ran successfully, "
-            "but real Bilibili import tools are not wired in yet."
-        )
         route = state.get("route")
         tool_name = "bilibili_import" if route == "import_request" else "bilibili_retry"
         action_name = "prepare_import_plan" if route == "import_request" else "prepare_retry_plan"
-        self._emit_event(
-            state["run_id"],
-            "tool_execution_started",
-            {"route": route, "tool": tool_name, "action": action_name},
-        )
-        self.repository.upsert_run_step(
-            state["run_id"],
-            "execute_placeholder",
-            "execute_placeholder",
-            "completed",
-            input_summary="approved tool request",
-            output_summary="placeholder execution finished",
-        )
-        self._emit_event(
-            state["run_id"],
-            "tool_execution_finished",
-            {
+        with self.runtime_audit.trace_span(
+            name=f"tool.{tool_name}.{action_name}",
+            run_type="tool",
+            inputs={
+                "run_id": state["run_id"],
+                "route": route,
+                "tool": tool_name,
+                "action": action_name,
+            },
+            metadata=self._span_metadata(state),
+            tags=["agent", "tool", tool_name],
+        ) as trace_run:
+            response = (
+                "Execution was approved. The tool pipeline placeholder ran successfully, "
+                "but real Bilibili import tools are not wired in yet."
+            )
+            self._emit_event(
+                state["run_id"],
+                "tool_execution_started",
+                {"route": route, "tool": tool_name, "action": action_name},
+            )
+            self.repository.upsert_run_step(
+                state["run_id"],
+                "execute_placeholder",
+                "execute_placeholder",
+                "completed",
+                input_summary="approved tool request",
+                output_summary="placeholder execution finished",
+            )
+            payload = {
                 "route": route,
                 "tool": tool_name,
                 "action": action_name,
                 "reply": response,
-            },
-        )
-        return {"status": "completed", "response": response}
+            }
+            self._emit_event(state["run_id"], "tool_execution_finished", payload)
+            result = {"status": "completed", "response": response}
+            trace_run.end(outputs={"event": payload, "result": result})
+            return result
 
     def _finalize_run(self, state: AgentState) -> dict[str, Any]:
-        status = state.get("status", "completed")
-        self.repository.upsert_run_step(
-            state["run_id"],
-            "finalize_run",
-            "finalize_run",
-            "completed",
-            input_summary="finalize run state",
-            output_summary=status,
-        )
-        event_type = "run_failed" if status == "failed" else "run_completed"
-        self._emit_event(
-            state["run_id"],
-            event_type,
-            {
+        with self.runtime_audit.trace_span(
+            name="agent.finalize_run",
+            run_type="chain",
+            inputs={
+                "run_id": state["run_id"],
+                "status": state.get("status", "completed"),
+                "route": state.get("route"),
+            },
+            metadata=self._span_metadata(state),
+            tags=["agent", "finalize"],
+        ) as trace_run:
+            status = state.get("status", "completed")
+            self.repository.upsert_run_step(
+                state["run_id"],
+                "finalize_run",
+                "finalize_run",
+                "completed",
+                input_summary="finalize run state",
+                output_summary=status,
+            )
+            event_type = "run_failed" if status == "failed" else "run_completed"
+            payload = {
                 "status": status,
                 "route": state.get("route"),
                 "reply": state.get("response", ""),
-            },
-        )
-        return {"status": status}
+            }
+            self._emit_event(state["run_id"], event_type, payload)
+            result = {"status": status}
+            trace_run.end(outputs={"event": payload, "result": result})
+            return result
+
+    def _span_metadata(self, state: AgentState) -> dict[str, Any]:
+        return {
+            "thread_id": state["run_id"],
+            "run_id": state["run_id"],
+            "session_id": state["session_id"],
+            "user_id": state.get("user_id"),
+            "route": state.get("route"),
+            "intent": state.get("intent"),
+        }
 
     def _detect_route(self, message: str) -> RouteType:
         lowered = message.lower()

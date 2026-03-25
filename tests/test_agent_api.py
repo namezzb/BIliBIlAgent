@@ -1,7 +1,10 @@
 import json
 import sqlite3
+from contextlib import contextmanager
 from pathlib import Path
+from uuid import uuid4
 
+import pytest
 from fastapi.testclient import TestClient
 
 from app.core.config import Settings
@@ -9,18 +12,108 @@ from app.db.repository import SQLiteRepository
 from app.main import create_app
 from app.services.knowledge_index import KnowledgeIndexService
 from app.services.llm import OpenAICompatibleLLM
+from app.services.runtime_audit import LangSmithRuntimeAudit
 from app.services.session_memory import SessionMemoryManager
 
 
-def build_client(tmp_path: Path) -> TestClient:
+class FakeTraceRun:
+    def __init__(self, name: str, *, metadata: dict[str, object] | None = None) -> None:
+        self.id = str(uuid4())
+        self.name = name
+        self.metadata = metadata or {}
+        self.outputs: dict[str, object] | None = None
+
+    def add_metadata(self, metadata: dict[str, object]) -> None:
+        self.metadata.update(metadata)
+
+    def end(self, outputs: dict[str, object] | None = None) -> None:
+        self.outputs = outputs
+
+    def get_url(self) -> str:
+        return f"https://smith.example.test/runs/{self.id}"
+
+
+class FakeRuntimeAudit:
+    def __init__(self) -> None:
+        self.app_name = "BIliBIlAgent API"
+        self.environment = "test"
+        self.requests: list[dict[str, object]] = []
+        self.spans: list[dict[str, object]] = []
+
+    @contextmanager
+    def trace_request(
+        self,
+        *,
+        name: str,
+        inputs: dict[str, object],
+        metadata: dict[str, object],
+        tags: list[str] | None = None,
+    ):
+        run = FakeTraceRun(name, metadata=metadata)
+        self.requests.append(
+            {"name": name, "inputs": inputs, "metadata": metadata, "tags": tags or [], "run": run}
+        )
+        yield run
+
+    @contextmanager
+    def trace_span(
+        self,
+        *,
+        name: str,
+        run_type: str,
+        inputs: dict[str, object],
+        metadata: dict[str, object] | None = None,
+        tags: list[str] | None = None,
+    ):
+        run = FakeTraceRun(name, metadata=metadata)
+        self.spans.append(
+            {
+                "name": name,
+                "run_type": run_type,
+                "inputs": inputs,
+                "metadata": metadata or {},
+                "tags": tags or [],
+                "run": run,
+            }
+        )
+        yield run
+
+    def build_reference(
+        self,
+        *,
+        run_id: str,
+        trace_run: FakeTraceRun,
+        existing_url: str | None = None,
+    ) -> dict[str, str | None]:
+        return {
+            "langsmith_thread_id": run_id,
+            "langsmith_thread_url": existing_url or trace_run.get_url(),
+        }
+
+    def sanitize_payload(self, value):
+        return value
+
+    def close(self) -> None:
+        return None
+
+
+def build_client(
+    tmp_path: Path,
+    *,
+    runtime_audit: FakeRuntimeAudit | None = None,
+    raise_server_exceptions: bool = True,
+) -> TestClient:
     settings = Settings(
         app_db_path=tmp_path / "app.db",
         checkpoint_db_path=tmp_path / "checkpoints.db",
         chroma_persist_dir=tmp_path / "chroma",
         data_dir=tmp_path,
+        langsmith_tracing=True,
+        langsmith_api_key="test-langsmith-key",
+        langsmith_project="bilibilagent-tests",
     )
-    app = create_app(settings)
-    return TestClient(app)
+    app = create_app(settings, runtime_audit=runtime_audit or FakeRuntimeAudit())
+    return TestClient(app, raise_server_exceptions=raise_server_exceptions)
 
 
 class FakeVectorIndex:
@@ -107,6 +200,8 @@ def test_general_chat_returns_completed_when_llm_is_unconfigured(tmp_path: Path)
         assert body["requires_confirmation"] is False
         assert body["session_id"]
         assert body["run_id"]
+        assert body["langsmith_thread_id"] == body["run_id"]
+        assert body["langsmith_thread_url"]
 
 
 def test_import_request_requires_confirmation_and_can_be_approved(tmp_path: Path) -> None:
@@ -120,6 +215,9 @@ def test_import_request_requires_confirmation_and_can_be_approved(tmp_path: Path
         assert first_body["requires_confirmation"] is True
         assert first_body["pending_actions"]
         assert first_body["pending_actions"][0]["tool"] == "bilibili_import"
+        assert first_body["langsmith_thread_id"] == first_body["run_id"]
+        initial_thread_url = first_body["langsmith_thread_url"]
+        assert initial_thread_url
 
         confirm_response = client.post(
             f"/api/runs/{first_body['run_id']}/confirm",
@@ -129,6 +227,8 @@ def test_import_request_requires_confirmation_and_can_be_approved(tmp_path: Path
         confirm_body = confirm_response.json()
         assert confirm_body["status"] == "completed"
         assert confirm_body["approval_status"] == "approved"
+        assert confirm_body["langsmith_thread_id"] == first_body["run_id"]
+        assert confirm_body["langsmith_thread_url"] == initial_thread_url
 
 
 def test_run_detail_returns_steps(tmp_path: Path) -> None:
@@ -142,6 +242,8 @@ def test_run_detail_returns_steps(tmp_path: Path) -> None:
         body = detail_response.json()
         assert body["run_id"] == run_id
         assert body["route"] == "video_knowledge_query"
+        assert body["langsmith_thread_id"] == run_id
+        assert body["langsmith_thread_url"]
         assert body["event_count"] >= 4
         assert len(body["steps"]) >= 3
 
@@ -410,6 +512,66 @@ def test_view_user_memory_command_returns_summary(tmp_path: Path) -> None:
         assert "favorite_folder = ai-learning" in body["reply"]
 
 
+def test_app_startup_requires_langsmith_config(tmp_path: Path) -> None:
+    settings = Settings(
+        app_db_path=tmp_path / "app.db",
+        checkpoint_db_path=tmp_path / "checkpoints.db",
+        chroma_persist_dir=tmp_path / "chroma",
+        data_dir=tmp_path,
+    )
+    app = create_app(settings)
+
+    with pytest.raises(RuntimeError, match="LANGSMITH_TRACING"):
+        with TestClient(app):
+            pass
+
+
+def test_run_failure_marks_local_run_as_failed(tmp_path: Path) -> None:
+    with build_client(tmp_path, raise_server_exceptions=False) as client:
+        def broken_apply_chat_command(*args, **kwargs):
+            raise RuntimeError("forced chat command failure")
+
+        client.app.state.user_memory.apply_chat_command = broken_apply_chat_command
+
+        response = client.post(
+            "/api/chat",
+            json={"user_id": "user-fail", "message": "记住偏好: reply_language=zh-CN"},
+        )
+
+        assert response.status_code == 500
+        body = response.json()
+        assert "Agent run failed" in body["detail"]
+
+        with sqlite3.connect(tmp_path / "app.db") as connection:
+            connection.row_factory = sqlite3.Row
+            row = connection.execute(
+                """
+                SELECT run_id, status, latest_reply
+                FROM runs
+                ORDER BY created_at DESC
+                LIMIT 1
+                """
+            ).fetchone()
+
+        assert row is not None
+        assert row["status"] == "failed"
+        assert "forced chat command failure" in row["latest_reply"]
+
+
+def test_langsmith_runtime_audit_redacts_secret_fields() -> None:
+    audit = LangSmithRuntimeAudit.__new__(LangSmithRuntimeAudit)
+
+    payload = {
+        "api_key": "secret-value",
+        "nested": {"cookie": "session-token", "normal": "A" * 1205},
+    }
+    sanitized = audit.sanitize_payload(payload)
+
+    assert sanitized["api_key"] == "<redacted>"
+    assert sanitized["nested"]["cookie"] == "<redacted>"
+    assert sanitized["nested"]["normal"].endswith("...<truncated>")
+
+
 def build_knowledge_payload() -> dict[str, object]:
     return {
         "favorite_folders": [
@@ -676,6 +838,7 @@ class RecordingLLM(OpenAICompatibleLLM):
             summary_model="test-summary-model",
             embedding_model="test-embedding-model",
             system_prompt="base system prompt",
+            runtime_audit=FakeRuntimeAudit(),
         )
         self.last_messages: list[dict[str, str]] = []
 

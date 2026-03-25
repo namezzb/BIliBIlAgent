@@ -37,6 +37,15 @@ class Settings(BaseSettings):
         default="openai/text-embedding-3-small",
         validation_alias=AliasChoices("EMBEDDING_MODEL", "OPENROUTER_EMBEDDING_MODEL"),
     )
+    langsmith_tracing: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("LANGSMITH_TRACING", "LANGSMITH_TRACING_V2"),
+    )
+    langsmith_api_key: str | None = Field(default=None, alias="LANGSMITH_API_KEY")
+    langsmith_project: str | None = Field(default=None, alias="LANGSMITH_PROJECT")
+    langsmith_endpoint: str | None = Field(default=None, alias="LANGSMITH_ENDPOINT")
+    langsmith_workspace_id: str | None = Field(default=None, alias="LANGSMITH_WORKSPACE_ID")
+    langsmith_web_url: str | None = Field(default=None, alias="LANGSMITH_WEB_URL")
     llm_system_prompt: str = (
         "You are BIliBIlAgent. Answer directly when the user asks for general chat. "
         "Keep responses concise and helpful."

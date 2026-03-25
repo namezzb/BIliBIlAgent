@@ -26,6 +26,50 @@ router = APIRouter(prefix="/api", tags=["agent"])
 TERMINAL_STATUSES = {"completed", "cancelled", "failed"}
 
 
+def _persist_run_result(
+    repository,
+    run_id: str,
+    result: dict[str, object],
+) -> None:
+    repository.update_run(
+        run_id,
+        intent=result["intent"],
+        route=result["route"],
+        langsmith_thread_id=result.get("langsmith_thread_id"),
+        langsmith_thread_url=result.get("langsmith_thread_url"),
+        status=result["status"],
+        requires_confirmation=result["requires_confirmation"],
+        approval_status=result["approval_status"],
+        latest_reply=result["reply"],
+        pending_actions=result["pending_actions"],
+    )
+
+
+def _record_run_failure(repository, run_id: str, detail: str) -> None:
+    repository.upsert_run_step(
+        run_id,
+        "request_failed",
+        "request_failed",
+        "failed",
+        input_summary="request lifecycle",
+        output_summary=detail,
+    )
+    repository.append_run_event(
+        run_id,
+        "run_failed",
+        {
+            "status": "failed",
+            "route": None,
+            "reply": detail,
+        },
+    )
+    repository.update_run(
+        run_id,
+        status="failed",
+        latest_reply=detail,
+    )
+
+
 @router.post("/chat", response_model=ChatResponse)
 def chat(request: Request, payload: ChatRequest) -> ChatResponse:
     repository = request.app.state.repository
@@ -57,26 +101,26 @@ def chat(request: Request, payload: ChatRequest) -> ChatResponse:
     if user_id:
         user_memory_context = request.app.state.user_memory.build_context_message(user_id)
 
-    result = orchestrator.invoke_chat(
-        session_id=session_id,
-        run_id=run_id,
-        message=payload.message,
-        messages=session_context["messages"],
-        user_id=user_id,
-        session_summary=session_context["session_summary"],
-        recent_context=session_context["recent_context"],
-        user_memory_context=user_memory_context,
-    )
-    repository.update_run(
-        run_id,
-        intent=result["intent"],
-        route=result["route"],
-        status=result["status"],
-        requires_confirmation=result["requires_confirmation"],
-        approval_status=result["approval_status"],
-        latest_reply=result["reply"],
-        pending_actions=result["pending_actions"],
-    )
+    try:
+        result = orchestrator.invoke_chat(
+            session_id=session_id,
+            run_id=run_id,
+            message=payload.message,
+            messages=session_context["messages"],
+            user_id=user_id,
+            session_summary=session_context["session_summary"],
+            recent_context=session_context["recent_context"],
+            user_memory_context=user_memory_context,
+        )
+    except Exception as exc:
+        detail = f"Agent run failed: {exc}"
+        _record_run_failure(repository, run_id, detail)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=detail,
+        ) from exc
+
+    _persist_run_result(repository, run_id, result)
     repository.add_message(session_id, "assistant", result["reply"], run_id=run_id)
     session_memory.refresh_session_memory(
         session_id,
@@ -109,17 +153,24 @@ def confirm_run(
             detail="Run is not waiting for confirmation."
         )
 
-    result = orchestrator.resume_run(run_id, payload.approved)
-    repository.update_run(
-        run_id,
-        intent=result["intent"],
-        route=result["route"],
-        status=result["status"],
-        requires_confirmation=result["requires_confirmation"],
-        approval_status=result["approval_status"],
-        latest_reply=result["reply"],
-        pending_actions=result["pending_actions"],
-    )
+    try:
+        result = orchestrator.resume_run(run_id, payload.approved)
+    except Exception as exc:
+        detail = f"Agent run failed during confirmation: {exc}"
+        _record_run_failure(repository, run_id, detail)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=detail,
+        ) from exc
+    if existing_run.get("langsmith_thread_url") and not result.get("langsmith_thread_url"):
+        result["langsmith_thread_url"] = existing_run["langsmith_thread_url"]
+    elif existing_run.get("langsmith_thread_url"):
+        result["langsmith_thread_url"] = existing_run["langsmith_thread_url"]
+    if existing_run.get("langsmith_thread_id") and not result.get("langsmith_thread_id"):
+        result["langsmith_thread_id"] = existing_run["langsmith_thread_id"]
+    elif existing_run.get("langsmith_thread_id"):
+        result["langsmith_thread_id"] = existing_run["langsmith_thread_id"]
+    _persist_run_result(repository, run_id, result)
     repository.add_message(existing_run["session_id"], "assistant", result["reply"], run_id=run_id)
     session_memory.refresh_session_memory(
         existing_run["session_id"],
@@ -145,6 +196,8 @@ def get_run(run_id: str, request: Request) -> RunDetailResponse:
         run_id=existing_run["run_id"],
         intent=existing_run["intent"],
         route=existing_run["route"],
+        langsmith_thread_id=existing_run["langsmith_thread_id"],
+        langsmith_thread_url=existing_run["langsmith_thread_url"],
         status=existing_run["status"],
         reply=existing_run["latest_reply"] or "",
         requires_confirmation=existing_run["requires_confirmation"],
