@@ -1,3 +1,5 @@
+from typing import Literal
+
 from pydantic import BaseModel, Field
 
 
@@ -104,3 +106,84 @@ class UserMemoryPatchRequest(BaseModel):
             if value is not None:
                 updates[field_name] = value
         return updates
+
+
+class KnowledgeFavoriteFolderInput(BaseModel):
+    favorite_folder_id: str = Field(min_length=1)
+    title: str = Field(min_length=1)
+    intro: str | None = None
+
+
+class KnowledgeTextBlockInput(BaseModel):
+    text: str = Field(min_length=1)
+    source_type: Literal["subtitle", "asr"]
+    source_language: str | None = None
+    start_ms: int | None = None
+    end_ms: int | None = None
+
+
+class KnowledgeVideoPageInput(BaseModel):
+    page_id: str = Field(min_length=1)
+    page_number: int = Field(ge=1)
+    title: str = Field(min_length=1)
+    text_blocks: list[KnowledgeTextBlockInput] = Field(default_factory=list)
+
+
+class KnowledgeVideoInput(BaseModel):
+    video_id: str = Field(min_length=1)
+    bvid: str | None = None
+    title: str = Field(min_length=1)
+    favorite_folder_ids: list[str] = Field(default_factory=list)
+    pages: list[KnowledgeVideoPageInput] = Field(default_factory=list)
+
+
+class KnowledgeDebugIndexRequest(BaseModel):
+    favorite_folders: list[KnowledgeFavoriteFolderInput] = Field(default_factory=list)
+    videos: list[KnowledgeVideoInput] = Field(default_factory=list)
+
+
+class KnowledgeDebugIndexResponse(BaseModel):
+    favorite_folder_count: int
+    video_count: int
+    page_count: int
+    chunk_count: int
+    embedding_model: str
+    embedding_version: str
+
+
+class KnowledgeSearchRequest(BaseModel):
+    query: str = Field(min_length=1)
+    top_k: int = Field(default=5, ge=1, le=20)
+    favorite_folder_ids: list[str] = Field(default_factory=list)
+    video_ids: list[str] = Field(default_factory=list)
+    source_types: list[Literal["subtitle", "asr"]] = Field(default_factory=list)
+
+
+class KnowledgeFavoriteFolderResponse(BaseModel):
+    favorite_folder_id: str
+    title: str
+    intro: str | None = None
+
+
+class KnowledgeVideoResponse(BaseModel):
+    video_id: str
+    bvid: str | None = None
+    title: str
+
+
+class KnowledgeSearchHitResponse(BaseModel):
+    score: float
+    chunk_id: str
+    text: str
+    source_type: str
+    source_language: str | None = None
+    start_ms: int | None = None
+    end_ms: int | None = None
+    favorite_folders: list[KnowledgeFavoriteFolderResponse] = Field(default_factory=list)
+    video: KnowledgeVideoResponse
+
+
+class KnowledgeSearchResponse(BaseModel):
+    query: str
+    total_hits: int
+    hits: list[KnowledgeSearchHitResponse] = Field(default_factory=list)

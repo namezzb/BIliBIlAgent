@@ -68,4 +68,70 @@ SCHEMA_STATEMENTS = [
         updated_at TEXT NOT NULL
     )
     """,
+    """
+    CREATE TABLE IF NOT EXISTS knowledge_favorite_folders (
+        favorite_folder_id TEXT PRIMARY KEY,
+        title TEXT NOT NULL,
+        intro TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS knowledge_videos (
+        video_id TEXT PRIMARY KEY,
+        bvid TEXT,
+        title TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS knowledge_favorite_videos (
+        favorite_folder_id TEXT NOT NULL,
+        video_id TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        PRIMARY KEY (favorite_folder_id, video_id)
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS knowledge_video_pages (
+        page_id TEXT PRIMARY KEY,
+        video_id TEXT NOT NULL,
+        page_number INTEGER NOT NULL,
+        title TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS knowledge_text_chunks (
+        chunk_id TEXT PRIMARY KEY,
+        video_id TEXT NOT NULL,
+        source_type TEXT NOT NULL,
+        source_language TEXT,
+        block_index INTEGER NOT NULL,
+        text TEXT NOT NULL,
+        start_ms INTEGER,
+        end_ms INTEGER,
+        embedding_model TEXT NOT NULL,
+        embedding_version TEXT NOT NULL,
+        index_status TEXT NOT NULL,
+        vector_document_id TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+    )
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_knowledge_video_pages_video_id
+    ON knowledge_video_pages (video_id)
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_knowledge_favorite_videos_video_id
+    ON knowledge_favorite_videos (video_id)
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_knowledge_text_chunks_video_id
+    ON knowledge_text_chunks (video_id)
+    """,
 ]

@@ -12,6 +12,11 @@ class Settings(BaseSettings):
     data_dir: Path = Path("data")
     app_db_path: Path = Path("data/app.db")
     checkpoint_db_path: Path = Path("data/checkpoints.db")
+    chroma_persist_dir: Path = Path("data/chroma")
+    chroma_collection_name: str = "knowledge_chunks"
+    knowledge_embedding_version: str = "v1"
+    knowledge_chunk_size: int = 1000
+    knowledge_chunk_overlap: int = 200
     llm_api_key: str | None = Field(
         default=None,
         validation_alias=AliasChoices("LLM_API_KEY", "OPENROUTER_API_KEY"),
@@ -47,6 +52,7 @@ class Settings(BaseSettings):
         self.data_dir.mkdir(parents=True, exist_ok=True)
         self.app_db_path.parent.mkdir(parents=True, exist_ok=True)
         self.checkpoint_db_path.parent.mkdir(parents=True, exist_ok=True)
+        self.chroma_persist_dir.mkdir(parents=True, exist_ok=True)
 
 
 @lru_cache(maxsize=1)

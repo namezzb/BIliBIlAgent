@@ -8,6 +8,10 @@ from fastapi.responses import StreamingResponse
 from app.api.schemas import (
     ChatRequest,
     ChatResponse,
+    KnowledgeDebugIndexRequest,
+    KnowledgeDebugIndexResponse,
+    KnowledgeSearchRequest,
+    KnowledgeSearchResponse,
     RunEventResponse,
     RunConfirmationRequest,
     RunDetailResponse,
@@ -15,6 +19,7 @@ from app.api.schemas import (
     UserMemoryPatchRequest,
     UserMemoryProfileResponse,
 )
+from app.services.knowledge_index import DuplicateKnowledgeVideoError
 
 
 router = APIRouter(prefix="/api", tags=["agent"])
@@ -200,6 +205,41 @@ def delete_user_memory(
     user_memory = request.app.state.user_memory
     user_memory.delete_entry(user_id, group, key)
     return UserMemoryProfileResponse(**user_memory.get_profile_detail(user_id))
+
+
+@router.post("/knowledge/debug/index", response_model=KnowledgeDebugIndexResponse)
+def debug_index_knowledge(
+    payload: KnowledgeDebugIndexRequest,
+    request: Request,
+) -> KnowledgeDebugIndexResponse:
+    knowledge_index = request.app.state.knowledge_index
+    try:
+        result = knowledge_index.index_documents(payload.model_dump())
+    except DuplicateKnowledgeVideoError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Knowledge indexing failed: {exc}",
+        ) from exc
+    return KnowledgeDebugIndexResponse(**result)
+
+
+@router.post("/knowledge/search", response_model=KnowledgeSearchResponse)
+def search_knowledge(
+    payload: KnowledgeSearchRequest,
+    request: Request,
+) -> KnowledgeSearchResponse:
+    knowledge_index = request.app.state.knowledge_index
+    try:
+        result = knowledge_index.search(payload.model_dump())
+    except RuntimeError as exc:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)) from exc
+    return KnowledgeSearchResponse(**result)
 
 
 @router.get("/runs/{run_id}/events")

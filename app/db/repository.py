@@ -24,6 +24,7 @@ class SQLiteRepository:
             self._ensure_sessions_user_id_column(connection)
             self._ensure_sessions_memory_columns(connection)
             self._ensure_runs_route_column(connection)
+            self._ensure_knowledge_text_chunks_video_schema(connection)
             connection.commit()
 
     def _ensure_sessions_user_id_column(self, connection: sqlite3.Connection) -> None:
@@ -45,6 +46,44 @@ class SQLiteRepository:
         columns = {row["name"] for row in rows}
         if "route" not in columns:
             connection.execute("ALTER TABLE runs ADD COLUMN route TEXT")
+
+    def _ensure_knowledge_text_chunks_video_schema(self, connection: sqlite3.Connection) -> None:
+        rows = connection.execute("PRAGMA table_info(knowledge_text_chunks)").fetchall()
+        if not rows:
+            return
+        columns = {row["name"] for row in rows}
+        if "video_id" in columns:
+            return
+
+        connection.execute("DROP INDEX IF EXISTS idx_knowledge_text_chunks_page_id")
+        connection.execute("ALTER TABLE knowledge_text_chunks RENAME TO knowledge_text_chunks_legacy")
+        connection.execute(
+            """
+            CREATE TABLE knowledge_text_chunks (
+                chunk_id TEXT PRIMARY KEY,
+                video_id TEXT NOT NULL,
+                source_type TEXT NOT NULL,
+                source_language TEXT,
+                block_index INTEGER NOT NULL,
+                text TEXT NOT NULL,
+                start_ms INTEGER,
+                end_ms INTEGER,
+                embedding_model TEXT NOT NULL,
+                embedding_version TEXT NOT NULL,
+                index_status TEXT NOT NULL,
+                vector_document_id TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+            """
+        )
+        connection.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_knowledge_text_chunks_video_id
+            ON knowledge_text_chunks (video_id)
+            """
+        )
+        connection.execute("DROP TABLE knowledge_text_chunks_legacy")
 
     def _connect(self) -> sqlite3.Connection:
         connection = sqlite3.connect(self.db_path)
@@ -292,6 +331,252 @@ class SQLiteRepository:
             "created_at": created_at,
             "updated_at": timestamp,
         }
+
+    def upsert_knowledge_bundle(
+        self,
+        *,
+        favorite_folders: list[dict[str, Any]],
+        videos: list[dict[str, Any]],
+        favorite_video_links: list[dict[str, str]],
+        pages: list[dict[str, Any]],
+        chunks: list[dict[str, Any]],
+    ) -> None:
+        timestamp = utc_now()
+
+        with self._connect() as connection:
+            for folder in favorite_folders:
+                connection.execute(
+                    """
+                    INSERT INTO knowledge_favorite_folders (
+                        favorite_folder_id,
+                        title,
+                        intro,
+                        created_at,
+                        updated_at
+                    ) VALUES (?, ?, ?, ?, ?)
+                    ON CONFLICT(favorite_folder_id) DO UPDATE SET
+                        title = excluded.title,
+                        intro = excluded.intro,
+                        updated_at = excluded.updated_at
+                    """,
+                    (
+                        folder["favorite_folder_id"],
+                        folder["title"],
+                        folder.get("intro"),
+                        timestamp,
+                        timestamp,
+                    ),
+                )
+
+            for video in videos:
+                connection.execute(
+                    """
+                    INSERT INTO knowledge_videos (
+                        video_id,
+                        bvid,
+                        title,
+                        created_at,
+                        updated_at
+                    ) VALUES (?, ?, ?, ?, ?)
+                    ON CONFLICT(video_id) DO UPDATE SET
+                        bvid = excluded.bvid,
+                        title = excluded.title,
+                        updated_at = excluded.updated_at
+                    """,
+                    (
+                        video["video_id"],
+                        video.get("bvid"),
+                        video["title"],
+                        timestamp,
+                        timestamp,
+                    ),
+                )
+
+            for link in favorite_video_links:
+                connection.execute(
+                    """
+                    INSERT INTO knowledge_favorite_videos (
+                        favorite_folder_id,
+                        video_id,
+                        created_at
+                    ) VALUES (?, ?, ?)
+                    ON CONFLICT(favorite_folder_id, video_id) DO NOTHING
+                    """,
+                    (
+                        link["favorite_folder_id"],
+                        link["video_id"],
+                        timestamp,
+                    ),
+                )
+
+            for page in pages:
+                connection.execute(
+                    """
+                    INSERT INTO knowledge_video_pages (
+                        page_id,
+                        video_id,
+                        page_number,
+                        title,
+                        created_at,
+                        updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(page_id) DO UPDATE SET
+                        video_id = excluded.video_id,
+                        page_number = excluded.page_number,
+                        title = excluded.title,
+                        updated_at = excluded.updated_at
+                    """,
+                    (
+                        page["page_id"],
+                        page["video_id"],
+                        page["page_number"],
+                        page["title"],
+                        timestamp,
+                        timestamp,
+                    ),
+                )
+
+            for chunk in chunks:
+                connection.execute(
+                    """
+                    INSERT INTO knowledge_text_chunks (
+                        chunk_id,
+                        video_id,
+                        source_type,
+                        source_language,
+                        block_index,
+                        text,
+                        start_ms,
+                        end_ms,
+                        embedding_model,
+                        embedding_version,
+                        index_status,
+                        vector_document_id,
+                        created_at,
+                        updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(chunk_id) DO UPDATE SET
+                        video_id = excluded.video_id,
+                        source_type = excluded.source_type,
+                        source_language = excluded.source_language,
+                        block_index = excluded.block_index,
+                        text = excluded.text,
+                        start_ms = excluded.start_ms,
+                        end_ms = excluded.end_ms,
+                        embedding_model = excluded.embedding_model,
+                        embedding_version = excluded.embedding_version,
+                        index_status = excluded.index_status,
+                        vector_document_id = excluded.vector_document_id,
+                        updated_at = excluded.updated_at
+                    """,
+                    (
+                        chunk["chunk_id"],
+                        chunk["video_id"],
+                        chunk["source_type"],
+                        chunk.get("source_language"),
+                        chunk["block_index"],
+                        chunk["text"],
+                        chunk.get("start_ms"),
+                        chunk.get("end_ms"),
+                        chunk["embedding_model"],
+                        chunk["embedding_version"],
+                        chunk["index_status"],
+                        chunk["vector_document_id"],
+                        timestamp,
+                        timestamp,
+                    ),
+                )
+
+            connection.commit()
+
+    def get_existing_knowledge_video_ids(self, video_ids: list[str]) -> list[str]:
+        if not video_ids:
+            return []
+
+        placeholders = ", ".join("?" for _ in video_ids)
+        with self._connect() as connection:
+            rows = connection.execute(
+                f"""
+                SELECT video_id
+                FROM knowledge_videos
+                WHERE video_id IN ({placeholders})
+                ORDER BY video_id ASC
+                """,
+                video_ids,
+            ).fetchall()
+        return [str(row["video_id"]) for row in rows]
+
+    def get_knowledge_chunk_details(self, chunk_ids: list[str]) -> list[dict[str, Any]]:
+        if not chunk_ids:
+            return []
+
+        placeholders = ", ".join("?" for _ in chunk_ids)
+        with self._connect() as connection:
+            rows = connection.execute(
+                f"""
+                SELECT
+                    c.chunk_id,
+                    c.video_id,
+                    c.source_type,
+                    c.source_language,
+                    c.block_index,
+                    c.text,
+                    c.start_ms,
+                    c.end_ms,
+                    c.embedding_model,
+                    c.embedding_version,
+                    c.index_status,
+                    c.vector_document_id,
+                    v.video_id,
+                    v.bvid,
+                    v.title AS video_title,
+                    f.favorite_folder_id,
+                    f.title AS favorite_folder_title,
+                    f.intro AS favorite_folder_intro
+                FROM knowledge_text_chunks c
+                JOIN knowledge_videos v ON v.video_id = c.video_id
+                LEFT JOIN knowledge_favorite_videos fv ON fv.video_id = v.video_id
+                LEFT JOIN knowledge_favorite_folders f ON f.favorite_folder_id = fv.favorite_folder_id
+                WHERE c.chunk_id IN ({placeholders})
+                ORDER BY c.chunk_id ASC
+                """,
+                chunk_ids,
+            ).fetchall()
+
+        grouped: dict[str, dict[str, Any]] = {}
+        for row in rows:
+            chunk_id = str(row["chunk_id"])
+            if chunk_id not in grouped:
+                grouped[chunk_id] = {
+                    "chunk_id": chunk_id,
+                    "video_id": row["video_id"],
+                    "source_type": row["source_type"],
+                    "source_language": row["source_language"],
+                    "block_index": row["block_index"],
+                    "text": row["text"],
+                    "start_ms": row["start_ms"],
+                    "end_ms": row["end_ms"],
+                    "embedding_model": row["embedding_model"],
+                    "embedding_version": row["embedding_version"],
+                    "index_status": row["index_status"],
+                    "vector_document_id": row["vector_document_id"],
+                    "video": {
+                        "video_id": row["video_id"],
+                        "bvid": row["bvid"],
+                        "title": row["video_title"],
+                    },
+                    "favorite_folders": [],
+                }
+            if row["favorite_folder_id"] is not None:
+                grouped[chunk_id]["favorite_folders"].append(
+                    {
+                        "favorite_folder_id": row["favorite_folder_id"],
+                        "title": row["favorite_folder_title"],
+                        "intro": row["favorite_folder_intro"],
+                    }
+                )
+
+        return [grouped[chunk_id] for chunk_id in chunk_ids if chunk_id in grouped]
 
     def upsert_run_step(
         self,

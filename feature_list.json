@@ -161,8 +161,9 @@
     "dependencies": [
       "session-memory-management"
     ],
-    "passes": false,
-    "priority": "P0"
+    "passes": true,
+    "priority": "P0",
+    "notes": "已实现 `SQLite + Chroma` 的知识库记忆索引基础层：SQLite 规范化存储收藏夹、视频、分页和文本 chunk，Chroma 持久化向量索引；首版仅支持视频数据，按原始字幕/ASR block 建 chunk，并提供 `POST /api/knowledge/debug/index` 与 `POST /api/knowledge/search` 调试接口。检索支持按收藏夹、视频、分页和来源类型过滤，chunk 可完整追溯到收藏夹/视频/分页；聊天知识问答链路暂未接入，留待后续 `knowledge-retrieval`。"
   },
   {
     "id": "runtime-memory-audit",

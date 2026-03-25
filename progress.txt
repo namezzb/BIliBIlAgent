@@ -118,6 +118,23 @@ Next step:
 
 2026-03-25 15:20 CST
 Current goal: Implement `user-memory-management` as the next unfinished item in `feature_list.json`.
+
+2026-03-25 16:40 CST
+Current goal: Refine `knowledge-memory-index` so imports reject duplicate videos and chunking happens at whole-video level.
+Completed:
+- Changed knowledge indexing to reject repeated imports by `video_id` before embedding or vector writes.
+- Switched chunk generation from page/block-level records to video-level text aggregation ordered by `page_number`.
+- Added configurable chunk parameters (`knowledge_chunk_size=1000`, `knowledge_chunk_overlap=200`) and applied sliding-window chunking per video.
+- Simplified knowledge search hit payloads to return video and favorite-folder provenance without page-level mapping.
+- Fixed repository chunk-detail lookup to match the new video-level chunk schema.
+- Added tests for normalized persistence, search filtering, duplicate import rejection, long-text overlap chunking, embedding failure cleanup, and repository-failure compensation.
+- Verified with `poetry run pytest tests/test_agent_api.py` (`24 passed`).
+In progress:
+- None.
+Blockers:
+- None.
+Next step:
+- Continue with the next unfinished feature in `feature_list.json` when ready.
 Completed:
 - Added explicit `user_id` support to sessions and chat requests so long-term memory can persist across sessions without being tied to `session_id`.
 - Added a persistent `user_memory_profiles` store with structured `preferences` / `aliases` / `default_scopes` entries, including source metadata, confirmation flag, and timestamps.
@@ -131,3 +148,20 @@ Blockers:
 - None.
 Next step:
 - Implement the next unfinished feature after `user-memory-management`, which is `knowledge-memory-index` unless priorities change.
+
+2026-03-25 17:10 CST
+Current goal: Implement `knowledge-memory-index` as the next unfinished P0 feature in `feature_list.json`.
+Completed:
+- Added normalized knowledge storage in SQLite for favorite folders, videos, favorite-folder/video links, video pages, and text chunks, with chunk-level source metadata and vector document references.
+- Added Chroma-backed local vector indexing with configurable persist directory and collection name, plus an explicit embedding version field for future reindexing.
+- Implemented `KnowledgeIndexService` to validate normalized Bilibili-style payloads, keep raw subtitle/ASR blocks as chunks, write vectors to Chroma, persist metadata to SQLite, and compensate vector writes if SQLite persistence fails.
+- Added `POST /api/knowledge/debug/index` and `POST /api/knowledge/search` as debug APIs for manual indexing and filtered retrieval before the main import chain is wired in.
+- Pinned `chromadb` to the 0.5 line and constrained `onnxruntime` to a Python 3.10 compatible range so the local environment can install and run the index backend.
+- Extended the test suite to cover normalized knowledge persistence, filtered retrieval with source metadata, empty-index search behavior, embedding failure handling, and vector-write compensation on repository failure.
+- Verified the full backend suite with `poetry run pytest` (`22 passed`).
+In progress:
+- None.
+Blockers:
+- None.
+Next step:
+- Implement `runtime-memory-audit` or continue directly into `knowledge-retrieval`, depending on whether we want to prioritize richer runtime traceability or first connect knowledge queries to the new index.

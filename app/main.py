@@ -6,6 +6,7 @@ from app.agent.service import AgentOrchestrator
 from app.api.routes.chat import router as chat_router
 from app.core.config import Settings, get_settings
 from app.db.repository import SQLiteRepository
+from app.services.knowledge_index import ChromaVectorIndex, KnowledgeIndexService
 from app.services.llm import OpenAICompatibleLLM
 from app.services.session_memory import SessionMemoryManager
 from app.services.user_memory import UserMemoryManager
@@ -25,6 +26,18 @@ async def lifespan(app: FastAPI):
         system_prompt=settings.llm_system_prompt,
     )
     user_memory = UserMemoryManager(repository)
+    knowledge_index = KnowledgeIndexService(
+        repository=repository,
+        vector_index=ChromaVectorIndex(
+            persist_dir=settings.chroma_persist_dir,
+            collection_name=settings.chroma_collection_name,
+        ),
+        embed_texts=llm.embed_texts,
+        embedding_model=settings.embedding_model,
+        embedding_version=settings.knowledge_embedding_version,
+        chunk_size=settings.knowledge_chunk_size,
+        chunk_overlap=settings.knowledge_chunk_overlap,
+    )
     orchestrator = AgentOrchestrator(
         repository=repository,
         llm=llm,
@@ -37,6 +50,7 @@ async def lifespan(app: FastAPI):
     app.state.orchestrator = orchestrator
     app.state.session_memory = session_memory
     app.state.user_memory = user_memory
+    app.state.knowledge_index = knowledge_index
 
     try:
         yield

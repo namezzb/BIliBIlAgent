@@ -1,4 +1,5 @@
 import json
+import sqlite3
 from pathlib import Path
 
 from fastapi.testclient import TestClient
@@ -6,6 +7,7 @@ from fastapi.testclient import TestClient
 from app.core.config import Settings
 from app.db.repository import SQLiteRepository
 from app.main import create_app
+from app.services.knowledge_index import KnowledgeIndexService
 from app.services.llm import OpenAICompatibleLLM
 from app.services.session_memory import SessionMemoryManager
 
@@ -14,10 +16,83 @@ def build_client(tmp_path: Path) -> TestClient:
     settings = Settings(
         app_db_path=tmp_path / "app.db",
         checkpoint_db_path=tmp_path / "checkpoints.db",
+        chroma_persist_dir=tmp_path / "chroma",
         data_dir=tmp_path,
     )
     app = create_app(settings)
     return TestClient(app)
+
+
+class FakeVectorIndex:
+    def __init__(self, *, fail_upsert: bool = False) -> None:
+        self.fail_upsert = fail_upsert
+        self.documents: dict[str, dict[str, object]] = {}
+
+    def upsert(
+        self,
+        *,
+        ids: list[str],
+        embeddings: list[list[float]],
+        documents: list[str],
+        metadatas: list[dict[str, object]],
+    ) -> None:
+        if self.fail_upsert:
+            raise RuntimeError("forced upsert failure")
+        for vector_id, embedding, document, metadata in zip(
+            ids,
+            embeddings,
+            documents,
+            metadatas,
+            strict=False,
+        ):
+            self.documents[vector_id] = {
+                "embedding": embedding,
+                "document": document,
+                "metadata": metadata,
+            }
+
+    def delete(self, ids: list[str]) -> None:
+        for vector_id in ids:
+            self.documents.pop(vector_id, None)
+
+    def query(self, *, query_embedding: list[float], n_results: int) -> dict[str, object]:
+        selected = list(self.documents.items())[:n_results]
+        return {
+            "ids": [[item[0] for item in selected]],
+            "distances": [[0.05 * index for index, _ in enumerate(selected)]],
+        }
+
+    def count(self) -> int:
+        return len(self.documents)
+
+
+def fake_embed_texts(texts: list[str]) -> list[list[float]]:
+    return [[float(index)] for index, _ in enumerate(texts)]
+
+
+def failing_embed_texts(texts: list[str]) -> list[list[float]]:
+    raise RuntimeError("missing embedding credentials")
+
+
+def install_fake_knowledge_index(
+    client: TestClient,
+    *,
+    embedder=fake_embed_texts,
+    vector_index: FakeVectorIndex | None = None,
+    chunk_size: int = 1000,
+    chunk_overlap: int = 200,
+) -> FakeVectorIndex:
+    active_vector_index = vector_index or FakeVectorIndex()
+    client.app.state.knowledge_index = KnowledgeIndexService(
+        repository=client.app.state.repository,
+        vector_index=active_vector_index,
+        embed_texts=embedder,
+        embedding_model="test-embedding-model",
+        embedding_version="test-v1",
+        chunk_size=chunk_size,
+        chunk_overlap=chunk_overlap,
+    )
+    return active_vector_index
 
 
 def test_general_chat_returns_completed_when_llm_is_unconfigured(tmp_path: Path) -> None:
@@ -333,6 +408,263 @@ def test_view_user_memory_command_returns_summary(tmp_path: Path) -> None:
         body = response.json()
         assert "当前长期记忆" in body["reply"]
         assert "favorite_folder = ai-learning" in body["reply"]
+
+
+def build_knowledge_payload() -> dict[str, object]:
+    return {
+        "favorite_folders": [
+            {
+                "favorite_folder_id": "fav-ai",
+                "title": "AI Favorites",
+                "intro": "AI topics",
+            },
+            {
+                "favorite_folder_id": "fav-db",
+                "title": "Database Favorites",
+                "intro": "DB topics",
+            },
+        ],
+        "videos": [
+            {
+                "video_id": "video-rag",
+                "bvid": "BV1RAG",
+                "title": "RAG Intro",
+                "favorite_folder_ids": ["fav-ai", "fav-db"],
+                "pages": [
+                    {
+                        "page_id": "page-rag-1",
+                        "page_number": 1,
+                        "title": "Overview",
+                        "text_blocks": [
+                            {
+                                "text": "rag retrieval augmented generation basics",
+                                "source_type": "subtitle",
+                                "source_language": "zh-CN",
+                                "start_ms": 0,
+                                "end_ms": 2000,
+                            },
+                            {
+                                "text": "vector database indexing practice",
+                                "source_type": "subtitle",
+                                "source_language": "zh-CN",
+                                "start_ms": 2001,
+                                "end_ms": 4000,
+                            },
+                        ],
+                    }
+                ],
+            },
+            {
+                "video_id": "video-asr",
+                "bvid": "BV1ASR",
+                "title": "ASR Fallback",
+                "favorite_folder_ids": ["fav-ai"],
+                "pages": [
+                    {
+                        "page_id": "page-asr-1",
+                        "page_number": 1,
+                        "title": "ASR page",
+                        "text_blocks": [
+                            {
+                                "text": "speech recognition fallback pipeline",
+                                "source_type": "asr",
+                                "source_language": "en",
+                                "start_ms": 0,
+                                "end_ms": 1800,
+                            }
+                        ],
+                    }
+                ],
+            },
+        ],
+    }
+
+
+def build_long_knowledge_payload() -> dict[str, object]:
+    return {
+        "favorite_folders": [
+            {
+                "favorite_folder_id": "fav-long",
+                "title": "Long Favorites",
+                "intro": "Long text",
+            }
+        ],
+        "videos": [
+            {
+                "video_id": "video-long",
+                "bvid": "BV1LONG",
+                "title": "Long Video",
+                "favorite_folder_ids": ["fav-long"],
+                "pages": [
+                    {
+                        "page_id": "page-long-2",
+                        "page_number": 2,
+                        "title": "Part 2",
+                        "text_blocks": [
+                            {
+                                "text": "B" * 1400,
+                                "source_type": "subtitle",
+                                "source_language": "zh-CN",
+                                "start_ms": 0,
+                                "end_ms": 1000,
+                            }
+                        ],
+                    },
+                    {
+                        "page_id": "page-long-1",
+                        "page_number": 1,
+                        "title": "Part 1",
+                        "text_blocks": [
+                            {
+                                "text": "A" * 1400,
+                                "source_type": "subtitle",
+                                "source_language": "zh-CN",
+                                "start_ms": 0,
+                                "end_ms": 1000,
+                            }
+                        ],
+                    },
+                ],
+            }
+        ],
+    }
+
+
+def test_debug_index_knowledge_persists_normalized_entities(tmp_path: Path) -> None:
+    with build_client(tmp_path) as client:
+        install_fake_knowledge_index(client)
+
+        response = client.post("/api/knowledge/debug/index", json=build_knowledge_payload())
+
+        assert response.status_code == 200
+        body = response.json()
+        assert body["favorite_folder_count"] == 2
+        assert body["video_count"] == 2
+        assert body["page_count"] == 2
+        assert body["chunk_count"] == 2
+
+        repository: SQLiteRepository = client.app.state.repository
+        details = repository.get_knowledge_chunk_details(["video-rag:chunk:0", "video-asr:chunk:0"])
+        detail_by_chunk = {detail["chunk_id"]: detail for detail in details}
+        assert len(detail_by_chunk["video-rag:chunk:0"]["favorite_folders"]) == 2
+        assert detail_by_chunk["video-rag:chunk:0"]["video"]["video_id"] == "video-rag"
+        assert detail_by_chunk["video-rag:chunk:0"]["text"] == (
+            "rag retrieval augmented generation basics\nvector database indexing practice"
+        )
+        assert detail_by_chunk["video-asr:chunk:0"]["source_type"] == "asr"
+
+
+def test_knowledge_search_returns_filtered_hits_with_source_details(tmp_path: Path) -> None:
+    with build_client(tmp_path) as client:
+        install_fake_knowledge_index(client)
+        client.post("/api/knowledge/debug/index", json=build_knowledge_payload())
+
+        response = client.post(
+            "/api/knowledge/search",
+            json={
+                "query": "rag",
+                "top_k": 5,
+                "favorite_folder_ids": ["fav-db"],
+                "source_types": ["subtitle"],
+            },
+        )
+
+        assert response.status_code == 200
+        body = response.json()
+        assert body["total_hits"] >= 1
+        first_hit = body["hits"][0]
+        assert first_hit["video"]["video_id"] == "video-rag"
+        assert {folder["favorite_folder_id"] for folder in first_hit["favorite_folders"]} >= {
+            "fav-db"
+        }
+        assert first_hit["source_type"] == "subtitle"
+        assert "page" not in first_hit
+
+
+def test_knowledge_search_returns_empty_hits_when_index_is_empty(tmp_path: Path) -> None:
+    with build_client(tmp_path) as client:
+        install_fake_knowledge_index(client)
+
+        response = client.post("/api/knowledge/search", json={"query": "nothing"})
+
+        assert response.status_code == 200
+        assert response.json() == {"query": "nothing", "total_hits": 0, "hits": []}
+
+
+def test_debug_index_fails_cleanly_when_embedding_generation_fails(tmp_path: Path) -> None:
+    with build_client(tmp_path) as client:
+        vector_index = install_fake_knowledge_index(client, embedder=failing_embed_texts)
+
+        response = client.post("/api/knowledge/debug/index", json=build_knowledge_payload())
+
+        assert response.status_code == 503
+        assert "Embedding generation failed" in response.json()["detail"]
+        assert vector_index.count() == 0
+        repository: SQLiteRepository = client.app.state.repository
+        assert repository.get_knowledge_chunk_details(["video-rag:chunk:0"]) == []
+
+
+def test_debug_index_compensates_vector_writes_on_repository_failure(tmp_path: Path) -> None:
+    with build_client(tmp_path) as client:
+        vector_index = install_fake_knowledge_index(client)
+        repository: SQLiteRepository = client.app.state.repository
+
+        original_method = repository.upsert_knowledge_bundle
+
+        def fail_upsert_knowledge_bundle(**kwargs):  # type: ignore[no-untyped-def]
+            raise sqlite3.IntegrityError("forced sqlite failure")
+
+        repository.upsert_knowledge_bundle = fail_upsert_knowledge_bundle  # type: ignore[assignment]
+        try:
+            response = client.post("/api/knowledge/debug/index", json=build_knowledge_payload())
+        finally:
+            repository.upsert_knowledge_bundle = original_method  # type: ignore[assignment]
+
+        assert response.status_code == 500
+        assert vector_index.count() == 0
+
+
+def test_debug_index_rejects_duplicate_video_imports(tmp_path: Path) -> None:
+    with build_client(tmp_path) as client:
+        install_fake_knowledge_index(client)
+        payload = build_knowledge_payload()
+
+        first_response = client.post("/api/knowledge/debug/index", json=payload)
+        second_response = client.post("/api/knowledge/debug/index", json=payload)
+
+        assert first_response.status_code == 200
+        assert second_response.status_code == 409
+        assert "Videos already indexed" in second_response.json()["detail"]
+
+
+def test_debug_index_chunks_long_video_text_by_video_with_overlap(tmp_path: Path) -> None:
+    with build_client(tmp_path) as client:
+        install_fake_knowledge_index(client, chunk_size=1000, chunk_overlap=200)
+
+        response = client.post("/api/knowledge/debug/index", json=build_long_knowledge_payload())
+
+        assert response.status_code == 200
+        assert response.json()["chunk_count"] == 4
+
+        repository: SQLiteRepository = client.app.state.repository
+        details = repository.get_knowledge_chunk_details(
+            [
+                "video-long:chunk:0",
+                "video-long:chunk:1",
+                "video-long:chunk:2",
+                "video-long:chunk:3",
+            ]
+        )
+        chunk_texts = [detail["text"] for detail in details]
+
+        assert chunk_texts[0].startswith("A" * 1000)
+        assert chunk_texts[1].startswith("A" * 600)
+        assert chunk_texts[0][-200:] == chunk_texts[1][:200]
+        assert chunk_texts[2][-200:] == chunk_texts[3][:200]
+        assert set(chunk_texts[0]) == {"A"}
+        assert set(chunk_texts[1]) == {"A"}
+        assert set(chunk_texts[2]) == {"B"}
+        assert set(chunk_texts[3]) == {"B"}
 
 
 class RecordingLLM(OpenAICompatibleLLM):
