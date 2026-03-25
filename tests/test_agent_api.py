@@ -215,6 +215,11 @@ def test_import_request_requires_confirmation_and_can_be_approved(tmp_path: Path
         assert first_body["requires_confirmation"] is True
         assert first_body["pending_actions"]
         assert first_body["pending_actions"][0]["tool"] == "bilibili_import"
+        assert first_body["execution_plan"]["goal"].startswith("Import the requested")
+        assert first_body["execution_plan"]["steps"][0]["status"] == "pending"
+        assert first_body["execution_plan"]["tool_calls"][0]["args"]["request_message"] == (
+            "请帮我导入这个收藏夹"
+        )
         assert first_body["langsmith_thread_id"] == first_body["run_id"]
         initial_thread_url = first_body["langsmith_thread_url"]
         assert initial_thread_url
@@ -227,6 +232,7 @@ def test_import_request_requires_confirmation_and_can_be_approved(tmp_path: Path
         confirm_body = confirm_response.json()
         assert confirm_body["status"] == "completed"
         assert confirm_body["approval_status"] == "approved"
+        assert confirm_body["execution_plan"]["steps"][0]["status"] == "completed"
         assert confirm_body["langsmith_thread_id"] == first_body["run_id"]
         assert confirm_body["langsmith_thread_url"] == initial_thread_url
 
@@ -244,6 +250,7 @@ def test_run_detail_returns_steps(tmp_path: Path) -> None:
         assert body["route"] == "video_knowledge_query"
         assert body["langsmith_thread_id"] == run_id
         assert body["langsmith_thread_url"]
+        assert body["execution_plan"] is None
         assert body["event_count"] >= 4
         assert len(body["steps"]) >= 3
 
@@ -281,6 +288,9 @@ def test_tool_request_event_stream_contains_confirmation_event(tmp_path: Path) -
                     event_types.append(payload["type"])
                     if payload["type"] == "confirmation_required":
                         assert payload["payload"]["route"] == "import_request"
+                        assert payload["payload"]["execution_plan"]["tool_calls"][0]["tool"] == (
+                            "bilibili_import"
+                        )
                         break
 
         assert "confirmation_required" in event_types
@@ -312,6 +322,49 @@ def test_retry_request_uses_retry_route_and_tool(tmp_path: Path) -> None:
         assert body["route"] == "retry_request"
         assert body["status"] == "awaiting_confirmation"
         assert body["pending_actions"][0]["tool"] == "bilibili_retry"
+        assert body["execution_plan"]["tool_calls"][0]["action"] == "prepare_retry_plan"
+
+
+def test_tool_run_detail_returns_execution_plan_and_approval_timestamps(tmp_path: Path) -> None:
+    with build_client(tmp_path) as client:
+        first_response = client.post("/api/chat", json={"message": "请帮我导入这个收藏夹"})
+        run_id = first_response.json()["run_id"]
+        client.post(f"/api/runs/{run_id}/confirm", json={"approved": True})
+
+        detail_response = client.get(f"/api/runs/{run_id}")
+
+        assert detail_response.status_code == 200
+        body = detail_response.json()
+        assert body["execution_plan"]["tool_calls"][0]["tool"] == "bilibili_import"
+        assert body["approval_requested_at"]
+        assert body["approval_resolved_at"]
+        assert body["pending_actions"][0]["tool"] == "bilibili_import"
+
+
+def test_rejected_tool_request_is_cancelled_without_tool_execution(tmp_path: Path) -> None:
+    with build_client(tmp_path) as client:
+        first_response = client.post("/api/chat", json={"message": "请帮我导入这个收藏夹"})
+        run_id = first_response.json()["run_id"]
+
+        confirm_response = client.post(
+            f"/api/runs/{run_id}/confirm",
+            json={"approved": False},
+        )
+
+        assert confirm_response.status_code == 200
+        body = confirm_response.json()
+        assert body["status"] == "cancelled"
+        assert body["approval_status"] == "rejected"
+        assert body["execution_plan"]["steps"][0]["status"] == "cancelled"
+
+        with client.stream("GET", f"/api/runs/{run_id}/events?follow=false") as stream_response:
+            replayed_event_types = []
+            for line in stream_response.iter_lines():
+                if line.startswith("data: "):
+                    replayed_event_types.append(json.loads(line[6:])["type"])
+
+        assert "tool_execution_started" not in replayed_event_types
+        assert replayed_event_types[-1] == "run_completed"
 
 
 def test_favorite_knowledge_query_route_is_exposed(tmp_path: Path) -> None:
@@ -510,6 +563,20 @@ def test_view_user_memory_command_returns_summary(tmp_path: Path) -> None:
         body = response.json()
         assert "当前长期记忆" in body["reply"]
         assert "favorite_folder = ai-learning" in body["reply"]
+
+
+def test_runtime_audit_records_planned_tools_and_tool_target(tmp_path: Path) -> None:
+    runtime_audit = FakeRuntimeAudit()
+    with build_client(tmp_path, runtime_audit=runtime_audit) as client:
+        first_response = client.post("/api/chat", json={"message": "请帮我导入这个收藏夹"})
+        run_id = first_response.json()["run_id"]
+        client.post(f"/api/runs/{run_id}/confirm", json={"approved": True})
+
+    approval_span = next(span for span in runtime_audit.spans if span["name"] == "agent.approval_gate")
+    tool_span = next(span for span in runtime_audit.spans if span["name"] == "tool.bilibili_import.prepare_import_plan")
+
+    assert approval_span["run"].metadata["planned_tools"] == ["bilibili_import.prepare_import_plan"]
+    assert tool_span["run"].metadata["tool_target"] == "favorite-folder-ingestion"
 
 
 def test_app_startup_requires_langsmith_config(tmp_path: Path) -> None:

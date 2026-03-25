@@ -1,3 +1,4 @@
+from copy import deepcopy
 from pathlib import Path
 from typing import Any
 
@@ -6,7 +7,16 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.types import Command, interrupt
 
 from app.agent.events import aggregate_chat_response
-from app.agent.types import AgentState, IntentType, PendingAction, RouteType
+from app.agent.tools import TOOL_REGISTRY
+from app.agent.types import (
+    AgentState,
+    ExecutionPlan,
+    ExecutionStep,
+    IntentType,
+    PendingAction,
+    PlannedToolCall,
+    RouteType,
+)
 from app.db.repository import SQLiteRepository
 from app.services.llm import OpenAICompatibleLLM
 from app.services.runtime_audit import LangSmithRuntimeAudit
@@ -26,6 +36,7 @@ class AgentOrchestrator:
         self.llm = llm
         self.user_memory = user_memory
         self.runtime_audit = runtime_audit
+        self.tools = TOOL_REGISTRY
         self._checkpointer_cm = SqliteSaver.from_conn_string(str(checkpoint_db_path))
         self.checkpointer = self._checkpointer_cm.__enter__()
         self.graph = self._build_graph()
@@ -88,6 +99,7 @@ class AgentOrchestrator:
                     "status": "running",
                     "requires_confirmation": False,
                     "pending_actions": [],
+                    "execution_plan": None,
                 },
                 config={"configurable": {"thread_id": run_id}},
             )
@@ -98,6 +110,8 @@ class AgentOrchestrator:
                     "route": result.get("route"),
                     "status": result.get("status"),
                     "approval_status": result.get("approval_status"),
+                    "execution_goal": self._execution_goal(result.get("execution_plan")),
+                    "planned_tools": self._planned_tool_names(result.get("execution_plan")),
                 }
             )
             trace_run.end(outputs=self.runtime_audit.sanitize_payload(result))
@@ -137,6 +151,8 @@ class AgentOrchestrator:
                     "route": result.get("route"),
                     "status": result.get("status"),
                     "approval_status": result.get("approval_status"),
+                    "execution_goal": self._execution_goal(result.get("execution_plan")),
+                    "planned_tools": self._planned_tool_names(result.get("execution_plan")),
                 }
             )
             trace_run.end(outputs=self.runtime_audit.sanitize_payload(result))
@@ -149,7 +165,7 @@ class AgentOrchestrator:
         builder.add_node("classify_intent", self._classify_intent)
         builder.add_node("plan_or_answer", self._plan_or_answer)
         builder.add_node("approval_gate", self._approval_gate)
-        builder.add_node("execute_placeholder", self._execute_placeholder)
+        builder.add_node("execute_tools", self._execute_tools)
         builder.add_node("finalize_run", self._finalize_run)
 
         builder.add_edge(START, "load_context")
@@ -167,11 +183,11 @@ class AgentOrchestrator:
             "approval_gate",
             self._route_after_approval,
             {
-                "execute_placeholder": "execute_placeholder",
+                "execute_tools": "execute_tools",
                 "finalize_run": "finalize_run",
             },
         )
-        builder.add_edge("execute_placeholder", "finalize_run")
+        builder.add_edge("execute_tools", "finalize_run")
         builder.add_edge("finalize_run", END)
 
         return builder.compile(checkpointer=self.checkpointer)
@@ -191,7 +207,7 @@ class AgentOrchestrator:
 
     def _route_after_approval(self, state: AgentState) -> str:
         if state.get("approval_status") == "approved":
-            return "execute_placeholder"
+            return "execute_tools"
         return "finalize_run"
 
     def _load_context(self, state: AgentState) -> dict[str, Any]:
@@ -277,10 +293,17 @@ class AgentOrchestrator:
             route = state["route"]
 
             if route in {"import_request", "retry_request"}:
-                pending_actions = self._build_pending_actions(route, state["current_message"])
+                execution_plan = self._build_execution_plan(route, state["current_message"])
+                pending_actions = self._pending_actions_from_execution_plan(execution_plan)
                 response = (
                     "This request needs confirmation before execution. Review the planned "
                     "actions and call the confirmation endpoint to continue."
+                )
+                trace_run.add_metadata(
+                    {
+                        "execution_goal": execution_plan["goal"],
+                        "planned_tools": self._planned_tool_names(execution_plan),
+                    }
                 )
                 self.repository.upsert_run_step(
                     state["run_id"],
@@ -294,11 +317,13 @@ class AgentOrchestrator:
                     "intent": intent,
                     "route": route,
                     "reply": response,
+                    "execution_plan": execution_plan,
                     "pending_actions": pending_actions,
                 }
                 self._emit_event(state["run_id"], "response_prepared", payload)
                 result = {
                     "pending_actions": pending_actions,
+                    "execution_plan": execution_plan,
                     "requires_confirmation": True,
                     "status": "awaiting_confirmation",
                     "response": response,
@@ -347,10 +372,13 @@ class AgentOrchestrator:
                 "intent": intent,
                 "route": route,
                 "reply": response,
+                "execution_plan": None,
                 "pending_actions": [],
             }
             self._emit_event(state["run_id"], "response_prepared", payload)
             result = {
+                "pending_actions": [],
+                "execution_plan": None,
                 "requires_confirmation": False,
                 "status": "completed",
                 "response": response,
@@ -359,21 +387,31 @@ class AgentOrchestrator:
             return result
 
     def _approval_gate(self, state: AgentState) -> dict[str, Any]:
+        execution_plan = state.get("execution_plan")
+        pending_actions = self._pending_actions_from_execution_plan(execution_plan)
         with self.runtime_audit.trace_span(
             name="agent.approval_gate",
             run_type="chain",
             inputs={
                 "run_id": state["run_id"],
                 "route": state.get("route"),
-                "pending_actions": state.get("pending_actions", []),
+                "execution_plan": execution_plan,
             },
             metadata=self._span_metadata(state),
             tags=["agent", "approval"],
         ) as trace_run:
+            trace_run.add_metadata(
+                {
+                    "execution_goal": self._execution_goal(execution_plan),
+                    "planned_tools": self._planned_tool_names(execution_plan),
+                }
+            )
             payload = {
                 "run_id": state["run_id"],
                 "question": "Approve execution of the planned tool actions?",
-                "pending_actions": state.get("pending_actions", []),
+                "route": state.get("route"),
+                "execution_plan": execution_plan,
+                "pending_actions": pending_actions,
             }
             self.repository.upsert_run_step(
                 state["run_id"],
@@ -390,6 +428,7 @@ class AgentOrchestrator:
                 {
                     "question": payload["question"],
                     "route": state.get("route"),
+                    "execution_plan": execution_plan,
                     "pending_actions": payload["pending_actions"],
                     "reply": state.get("response", ""),
                 },
@@ -397,6 +436,10 @@ class AgentOrchestrator:
             decision = interrupt(payload)
             approved = self._is_approved(decision)
             approval_status = "approved" if approved else "rejected"
+            updated_execution_plan = self._mark_execution_plan_status(
+                execution_plan,
+                "approved" if approved else "cancelled",
+            )
             self.repository.upsert_run_step(
                 state["run_id"],
                 "approval_decision",
@@ -415,59 +458,105 @@ class AgentOrchestrator:
                 "approved": approved,
                 "route": state.get("route"),
                 "reply": reply,
+                "execution_plan": updated_execution_plan,
+                "pending_actions": pending_actions,
             }
             self._emit_event(state["run_id"], "confirmation_resolved", payload)
             result = {
                 "approval_status": approval_status,
                 "status": "running" if approved else "cancelled",
                 "response": reply,
+                "execution_plan": updated_execution_plan,
+                "pending_actions": pending_actions,
             }
             trace_run.end(outputs={"event": payload, "result": result})
             return result
 
-    def _execute_placeholder(self, state: AgentState) -> dict[str, Any]:
+    def _execute_tools(self, state: AgentState) -> dict[str, Any]:
         route = state.get("route")
-        tool_name = "bilibili_import" if route == "import_request" else "bilibili_retry"
-        action_name = "prepare_import_plan" if route == "import_request" else "prepare_retry_plan"
-        with self.runtime_audit.trace_span(
-            name=f"tool.{tool_name}.{action_name}",
-            run_type="tool",
-            inputs={
-                "run_id": state["run_id"],
-                "route": route,
-                "tool": tool_name,
-                "action": action_name,
-            },
-            metadata=self._span_metadata(state),
-            tags=["agent", "tool", tool_name],
-        ) as trace_run:
-            response = (
-                "Execution was approved. The tool pipeline placeholder ran successfully, "
-                "but real Bilibili import tools are not wired in yet."
-            )
-            self._emit_event(
-                state["run_id"],
-                "tool_execution_started",
-                {"route": route, "tool": tool_name, "action": action_name},
-            )
-            self.repository.upsert_run_step(
-                state["run_id"],
-                "execute_placeholder",
-                "execute_placeholder",
-                "completed",
-                input_summary="approved tool request",
-                output_summary="placeholder execution finished",
-            )
-            payload = {
-                "route": route,
-                "tool": tool_name,
-                "action": action_name,
-                "reply": response,
-            }
-            self._emit_event(state["run_id"], "tool_execution_finished", payload)
-            result = {"status": "completed", "response": response}
-            trace_run.end(outputs={"event": payload, "result": result})
-            return result
+        execution_plan = state.get("execution_plan")
+        pending_actions = self._pending_actions_from_execution_plan(execution_plan)
+        tool_calls = execution_plan.get("tool_calls", []) if execution_plan else []
+        tool_responses: list[str] = []
+        current_plan = execution_plan
+
+        for index, tool_call in enumerate(tool_calls, start=1):
+            tool_name = str(tool_call["tool"])
+            action_name = str(tool_call["action"])
+            tool = self._get_registered_tool(tool_name, action_name)
+            step_key = f"execute_tool_{index}_{tool_name}"
+            args = dict(tool_call.get("args", {}))
+            args_summary = self._summarize_tool_args(args)
+
+            with self.runtime_audit.trace_span(
+                name=f"tool.{tool_name}.{action_name}",
+                run_type="tool",
+                inputs={
+                    "run_id": state["run_id"],
+                    "route": route,
+                    "tool": tool_name,
+                    "action": action_name,
+                    "args": args,
+                },
+                metadata=self._span_metadata(state),
+                tags=["agent", "tool", tool_name],
+            ) as trace_run:
+                trace_run.add_metadata(
+                    {
+                        "execution_goal": self._execution_goal(current_plan),
+                        "planned_tools": self._planned_tool_names(current_plan),
+                        "tool_target": tool_call.get("target"),
+                    }
+                )
+                self._emit_event(
+                    state["run_id"],
+                    "tool_execution_started",
+                    {
+                        "route": route,
+                        "tool": tool_name,
+                        "action": action_name,
+                        "target": tool_call.get("target"),
+                        "args_summary": args_summary,
+                        "execution_plan": current_plan,
+                        "pending_actions": pending_actions,
+                    },
+                )
+                response = str(tool.invoke(args))
+                current_plan = self._mark_execution_step_completed(
+                    current_plan,
+                    tool=tool_name,
+                    action=action_name,
+                )
+                self.repository.upsert_run_step(
+                    state["run_id"],
+                    step_key,
+                    f"{tool_name}.{action_name}",
+                    "completed",
+                    input_summary=args_summary,
+                    output_summary=response,
+                )
+                payload = {
+                    "route": route,
+                    "tool": tool_name,
+                    "action": action_name,
+                    "target": tool_call.get("target"),
+                    "args_summary": args_summary,
+                    "reply": response,
+                    "execution_plan": current_plan,
+                    "pending_actions": pending_actions,
+                }
+                self._emit_event(state["run_id"], "tool_execution_finished", payload)
+                trace_run.end(outputs={"event": payload, "result": {"response": response}})
+                tool_responses.append(response)
+
+        final_response = "\n".join(tool_responses) if tool_responses else state.get("response", "")
+        result = {
+            "status": "completed",
+            "response": final_response,
+            "execution_plan": current_plan,
+            "pending_actions": pending_actions,
+        }
+        return result
 
     def _finalize_run(self, state: AgentState) -> dict[str, Any]:
         with self.runtime_audit.trace_span(
@@ -495,9 +584,15 @@ class AgentOrchestrator:
                 "status": status,
                 "route": state.get("route"),
                 "reply": state.get("response", ""),
+                "execution_plan": state.get("execution_plan"),
+                "pending_actions": state.get("pending_actions", []),
             }
             self._emit_event(state["run_id"], event_type, payload)
-            result = {"status": status}
+            result = {
+                "status": status,
+                "execution_plan": state.get("execution_plan"),
+                "pending_actions": state.get("pending_actions", []),
+            }
             trace_run.end(outputs={"event": payload, "result": result})
             return result
 
@@ -554,24 +649,127 @@ class AgentOrchestrator:
             return "tool_request"
         return "general_chat"
 
-    def _build_pending_actions(self, route: RouteType, message: str) -> list[PendingAction]:
+    def _build_execution_plan(self, route: RouteType, message: str) -> ExecutionPlan:
         if route == "retry_request":
-            return [
-                {
-                    "tool": "bilibili_retry",
-                    "action": "prepare_retry_plan",
+            tool_call: PlannedToolCall = {
+                "tool": "bilibili_retry",
+                "action": "prepare_retry_plan",
+                "target": "failed-import-items",
+                "description": f"Retry failed ingestion items related to: {message}",
+                "args": {
+                    "request_message": message,
                     "target": "failed-import-items",
-                    "description": f"Prepare a retry task for failed ingestion items related to: {message}",
-                }
-            ]
-        return [
-            {
+                },
+                "side_effect": True,
+            }
+            goal = "Retry the failed Bilibili ingestion items requested by the user."
+            summary = (
+                "After approval, the agent will run the retry pipeline for previously "
+                "failed ingestion items related to this request."
+            )
+        else:
+            tool_call = {
                 "tool": "bilibili_import",
                 "action": "prepare_import_plan",
                 "target": "favorite-folder-ingestion",
-                "description": f"Prepare a Bilibili import task for: {message}",
+                "description": f"Import Bilibili favorite-folder content for: {message}",
+                "args": {
+                    "request_message": message,
+                    "target": "favorite-folder-ingestion",
+                },
+                "side_effect": True,
             }
+            goal = "Import the requested Bilibili favorite-folder content into the knowledge base."
+            summary = (
+                "After approval, the agent will run the import pipeline for the requested "
+                "favorite-folder scope."
+            )
+
+        step: ExecutionStep = {
+            "id": "tool_call_1",
+            "title": f"Run {tool_call['tool']}.{tool_call['action']}",
+            "description": str(tool_call["description"]),
+            "tool": str(tool_call["tool"]),
+            "action": str(tool_call["action"]),
+            "status": "pending",
+        }
+        return {
+            "goal": goal,
+            "summary": summary,
+            "steps": [step],
+            "tool_calls": [tool_call],
+        }
+
+    def _pending_actions_from_execution_plan(
+        self,
+        execution_plan: ExecutionPlan | dict[str, Any] | None,
+    ) -> list[PendingAction]:
+        if not execution_plan:
+            return []
+        return [
+            {
+                "tool": str(tool_call["tool"]),
+                "action": str(tool_call["action"]),
+                "target": str(tool_call["target"]),
+                "description": str(tool_call["description"]),
+            }
+            for tool_call in execution_plan.get("tool_calls", [])
         ]
+
+    def _mark_execution_plan_status(
+        self,
+        execution_plan: ExecutionPlan | dict[str, Any] | None,
+        status: str,
+    ) -> ExecutionPlan | None:
+        if not execution_plan:
+            return None
+        updated_plan = deepcopy(execution_plan)
+        for step in updated_plan.get("steps", []):
+            step["status"] = status
+        return updated_plan
+
+    def _mark_execution_step_completed(
+        self,
+        execution_plan: ExecutionPlan | dict[str, Any] | None,
+        *,
+        tool: str,
+        action: str,
+    ) -> ExecutionPlan | None:
+        if not execution_plan:
+            return None
+        updated_plan = deepcopy(execution_plan)
+        for step in updated_plan.get("steps", []):
+            if step.get("tool") == tool and step.get("action") == action:
+                step["status"] = "completed"
+        return updated_plan
+
+    def _get_registered_tool(self, tool: str, action: str):
+        registered_tool = self.tools.get((tool, action))
+        if registered_tool is None:
+            raise RuntimeError(f"No registered tool for {tool}.{action}")
+        return registered_tool
+
+    def _execution_goal(self, execution_plan: ExecutionPlan | dict[str, Any] | None) -> str | None:
+        if not execution_plan:
+            return None
+        goal = execution_plan.get("goal")
+        return str(goal) if goal is not None else None
+
+    def _planned_tool_names(
+        self,
+        execution_plan: ExecutionPlan | dict[str, Any] | None,
+    ) -> list[str]:
+        if not execution_plan:
+            return []
+        return [
+            f"{tool_call['tool']}.{tool_call['action']}"
+            for tool_call in execution_plan.get("tool_calls", [])
+        ]
+
+    def _summarize_tool_args(self, args: dict[str, Any]) -> str:
+        if not args:
+            return "no args"
+        return ", ".join(f"{key}={value}" for key, value in args.items())
 
     def _is_approved(self, decision: Any) -> bool:
         if isinstance(decision, bool):

@@ -32,6 +32,9 @@ SCHEMA_STATEMENTS = [
         approval_status TEXT,
         latest_reply TEXT,
         pending_actions_json TEXT,
+        execution_plan_json TEXT,
+        approval_requested_at TEXT,
+        approval_resolved_at TEXT,
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL
     )

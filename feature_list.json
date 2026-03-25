@@ -233,9 +233,9 @@
     "dependencies": [
       "runtime-memory-audit"
     ],
-    "passes": false,
+    "passes": true,
     "priority": "P0",
-    "notes": "首版采用整批确认，不做逐步确认。"
+    "notes": "已将工具确认机制升级为结构化 `execution_plan` 流程：对导入/重试请求先生成目标、步骤和 `tool_calls` 列表，再通过 LangGraph `interrupt(...)` 暂停等待整批确认，确认后按计划顺序执行 LangChain tool registry 中已注册的副作用工具。SQLite `runs` 新增 `execution_plan_json` 与审批时间字段，`/api/chat`、`/api/runs/{run_id}/confirm`、`/api/runs/{run_id}` 与 SSE 事件统一返回执行计划；`pending_actions` 保留为兼容投影。LangSmith 审计补充了计划目标、工具列表和工具目标元数据；首版仍只支持整批确认，不支持审批时改参或逐步确认。"
   },
   {
     "id": "fav-folder-list",

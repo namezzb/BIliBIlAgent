@@ -42,6 +42,9 @@ def _persist_run_result(
         approval_status=result["approval_status"],
         latest_reply=result["reply"],
         pending_actions=result["pending_actions"],
+        execution_plan=result.get("execution_plan"),
+        approval_requested_at=result.get("approval_requested_at"),
+        approval_resolved_at=result.get("approval_resolved_at"),
     )
 
 
@@ -202,7 +205,10 @@ def get_run(run_id: str, request: Request) -> RunDetailResponse:
         reply=existing_run["latest_reply"] or "",
         requires_confirmation=existing_run["requires_confirmation"],
         approval_status=existing_run["approval_status"],
+        execution_plan=existing_run["execution_plan"],
         pending_actions=existing_run["pending_actions"],
+        approval_requested_at=existing_run["approval_requested_at"],
+        approval_resolved_at=existing_run["approval_resolved_at"],
         created_at=existing_run["created_at"],
         updated_at=existing_run["updated_at"],
         event_count=repository.get_run_event_count(run_id),

@@ -14,6 +14,7 @@ RouteType = Literal[
 
 
 RunStatus = Literal["running", "completed", "awaiting_confirmation", "cancelled", "failed"]
+ExecutionStepStatus = Literal["pending", "approved", "cancelled", "completed"]
 
 
 RunEventType = Literal[
@@ -37,6 +38,31 @@ class PendingAction(TypedDict, total=False):
     description: str
 
 
+class PlannedToolCall(TypedDict, total=False):
+    tool: str
+    action: str
+    description: str
+    target: str
+    args: dict[str, object]
+    side_effect: bool
+
+
+class ExecutionStep(TypedDict, total=False):
+    id: str
+    title: str
+    description: str
+    tool: str | None
+    action: str | None
+    status: ExecutionStepStatus
+
+
+class ExecutionPlan(TypedDict, total=False):
+    goal: str
+    summary: str
+    steps: list[ExecutionStep]
+    tool_calls: list[PlannedToolCall]
+
+
 class AgentState(TypedDict, total=False):
     session_id: str
     user_id: str | None
@@ -52,6 +78,7 @@ class AgentState(TypedDict, total=False):
     requires_confirmation: bool
     approval_status: Literal["approved", "rejected"] | None
     pending_actions: list[PendingAction]
+    execution_plan: ExecutionPlan | None
     response: str
 
 

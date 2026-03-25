@@ -25,6 +25,7 @@ class SQLiteRepository:
             self._ensure_sessions_memory_columns(connection)
             self._ensure_runs_route_column(connection)
             self._ensure_runs_langsmith_columns(connection)
+            self._ensure_runs_execution_plan_columns(connection)
             self._ensure_knowledge_text_chunks_video_schema(connection)
             connection.commit()
 
@@ -55,6 +56,16 @@ class SQLiteRepository:
             connection.execute("ALTER TABLE runs ADD COLUMN langsmith_thread_id TEXT")
         if "langsmith_thread_url" not in columns:
             connection.execute("ALTER TABLE runs ADD COLUMN langsmith_thread_url TEXT")
+
+    def _ensure_runs_execution_plan_columns(self, connection: sqlite3.Connection) -> None:
+        rows = connection.execute("PRAGMA table_info(runs)").fetchall()
+        columns = {row["name"] for row in rows}
+        if "execution_plan_json" not in columns:
+            connection.execute("ALTER TABLE runs ADD COLUMN execution_plan_json TEXT")
+        if "approval_requested_at" not in columns:
+            connection.execute("ALTER TABLE runs ADD COLUMN approval_requested_at TEXT")
+        if "approval_resolved_at" not in columns:
+            connection.execute("ALTER TABLE runs ADD COLUMN approval_resolved_at TEXT")
 
     def _ensure_knowledge_text_chunks_video_schema(self, connection: sqlite3.Connection) -> None:
         rows = connection.execute("PRAGMA table_info(knowledge_text_chunks)").fetchall()
@@ -242,6 +253,9 @@ class SQLiteRepository:
         approval_status: str | None = None,
         latest_reply: str | None = None,
         pending_actions: list[dict[str, Any]] | None = None,
+        execution_plan: dict[str, Any] | None = None,
+        approval_requested_at: str | None = None,
+        approval_resolved_at: str | None = None,
     ) -> None:
         assignments: list[str] = ["updated_at = ?"]
         values: list[Any] = [utc_now()]
@@ -273,6 +287,15 @@ class SQLiteRepository:
         if pending_actions is not None:
             assignments.append("pending_actions_json = ?")
             values.append(json.dumps(pending_actions, ensure_ascii=False))
+        if execution_plan is not None:
+            assignments.append("execution_plan_json = ?")
+            values.append(json.dumps(execution_plan, ensure_ascii=False))
+        if approval_requested_at is not None:
+            assignments.append("approval_requested_at = ?")
+            values.append(approval_requested_at)
+        if approval_resolved_at is not None:
+            assignments.append("approval_resolved_at = ?")
+            values.append(approval_resolved_at)
 
         values.append(run_id)
         with self._connect() as connection:
@@ -289,6 +312,7 @@ class SQLiteRepository:
                 SELECT run_id, session_id, intent, route, langsmith_thread_id,
                        langsmith_thread_url, status, requires_confirmation,
                        approval_status, latest_reply, pending_actions_json,
+                       execution_plan_json, approval_requested_at, approval_resolved_at,
                        created_at, updated_at
                 FROM runs
                 WHERE run_id = ?
@@ -301,6 +325,8 @@ class SQLiteRepository:
         result["requires_confirmation"] = bool(result["requires_confirmation"])
         pending_actions_json = result.pop("pending_actions_json")
         result["pending_actions"] = json.loads(pending_actions_json) if pending_actions_json else []
+        execution_plan_json = result.pop("execution_plan_json")
+        result["execution_plan"] = json.loads(execution_plan_json) if execution_plan_json else None
         return result
 
     def get_user_memory_profile(self, user_id: str) -> dict[str, Any] | None:

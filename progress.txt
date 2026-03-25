@@ -182,3 +182,20 @@ Blockers:
 - None.
 Next step:
 - Implement `tool-execution-confirmation` or start connecting `knowledge-retrieval`, depending on whether confirmation UX depth or retrieval functionality should be prioritized next.
+
+2026-03-25 20:05 CST
+Current goal: Implement `tool-execution-confirmation` as the next unfinished P0 feature in `feature_list.json`.
+Completed:
+- Replaced the old loose `pending_actions` placeholder flow with a structured `execution_plan` contract containing goal, summary, ordered steps, and `tool_calls`, while keeping `pending_actions` as a compatibility projection.
+- Kept approval on LangGraph's native `interrupt(...)` / `Command(resume=...)` flow, and changed the approval payload, run events, sync API responses, and run-detail responses to expose the full execution plan.
+- Added a LangChain tool registry using `langchain_core.tools.tool` for the current `bilibili_import` and `bilibili_retry` placeholder tools, then executed approved tool calls sequentially from the stored plan instead of inferring execution from route strings.
+- Extended SQLite `runs` with `execution_plan_json`, `approval_requested_at`, and `approval_resolved_at`, and returned those fields through run detail APIs while preserving existing local run-state and event replay behavior.
+- Enriched LangSmith step/tool metadata with execution goal, planned tool list, and tool target so approval and execution traces are directly auditable from the external trace view.
+- Added tests for structured execution-plan exposure, approval/rejection behavior, run-detail approval timestamps, SSE confirmation payloads, and runtime-audit metadata.
+- Verified the full backend suite with `poetry run pytest` (`30 passed`).
+In progress:
+- None.
+Blockers:
+- None.
+Next step:
+- Implement the next unfinished feature in `feature_list.json`, which is `fav-folder-list`, unless priorities change.

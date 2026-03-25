@@ -16,6 +16,31 @@ class PendingActionResponse(BaseModel):
     description: str
 
 
+class PlannedToolCallResponse(BaseModel):
+    tool: str
+    action: str
+    description: str
+    target: str
+    args: dict[str, object] = Field(default_factory=dict)
+    side_effect: bool
+
+
+class ExecutionStepResponse(BaseModel):
+    id: str
+    title: str
+    description: str
+    tool: str | None = None
+    action: str | None = None
+    status: str
+
+
+class ExecutionPlanResponse(BaseModel):
+    goal: str
+    summary: str
+    steps: list[ExecutionStepResponse] = Field(default_factory=list)
+    tool_calls: list[PlannedToolCallResponse] = Field(default_factory=list)
+
+
 class ChatResponse(BaseModel):
     session_id: str
     run_id: str
@@ -27,6 +52,7 @@ class ChatResponse(BaseModel):
     reply: str
     requires_confirmation: bool = False
     approval_status: str | None = None
+    execution_plan: ExecutionPlanResponse | None = None
     pending_actions: list[PendingActionResponse] = Field(default_factory=list)
 
 
@@ -44,6 +70,8 @@ class RunStepResponse(BaseModel):
 
 
 class RunDetailResponse(ChatResponse):
+    approval_requested_at: str | None = None
+    approval_resolved_at: str | None = None
     created_at: str
     updated_at: str
     event_count: int

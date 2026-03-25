@@ -10,6 +10,7 @@ dependencies = [
     "chromadb>=0.5.23,<0.6.0",
     "fastapi>=0.115.0,<1.0.0",
     "httpx>=0.28.0,<1.0.0",
+    "langchain-core>=1.2.20,<2.0.0",
     "langchain-text-splitters>=0.3.8,<1.0.0",
     "langgraph>=0.6.0,<1.0.0",
     "langgraph-checkpoint-sqlite>=3.0.0,<4.0.0",
