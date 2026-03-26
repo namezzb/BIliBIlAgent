@@ -1,9 +1,0 @@
-- generic [ref=e5]:
-  - generic [ref=e6]:
-    - generic [ref=e7]: B
-    - generic [ref=e8]:
-      - heading "BIliBIl Agent" [level=1] [ref=e9]
-      - paragraph [ref=e10]: 连接你的 B 站收藏夹，开始 AI 问答
-  - generic:
-    - paragraph
-  - paragraph [ref=e15]: 登录态仅保存在本地浏览器，不会上传至服务器

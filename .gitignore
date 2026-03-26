@@ -209,3 +209,15 @@ __marimo__/
 
 .serena/
 .idea/
+
+# Playwright test artifacts
+.playwright-cli/
+*.png
+*.pdf
+
+# Runtime data / DB files
+data/
+
+# Screenshots from tests
+login*.png
+chat*.png
