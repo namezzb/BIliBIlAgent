@@ -410,9 +410,9 @@
       "knowledge-memory-index",
       "chat-routing"
     ],
-    "passes": false,
+    "passes": true,
     "priority": "P0",
-    "notes": "向量检索。"
+    "notes": "已实现面向聊天主链路的 `knowledge_retrieval`：在现有 `SQLite + Chroma` 向量检索基础上补齐了 `chunk -> page` 关联表，`POST /api/knowledge/search` 现支持 `favorite_folder_ids`、`video_ids`、`page_numbers`、`source_types` 过滤，并返回命中 chunk 的收藏夹、视频和分页来源。Agent 侧新增 LangChain structured tool（`response_format=content_and_artifact`）封装检索调用，可基于消息文本、`BV`/标题/收藏夹标题、分页标记和 `recent_context.last_retrieval` 解析检索范围，再将检索摘要写入 run steps/events 与当前 session recent context。"
   },
   {
     "id": "knowledge-grounded-qa",
@@ -446,9 +446,9 @@
     "dependencies": [
       "knowledge-retrieval"
     ],
-    "passes": false,
+    "passes": true,
     "priority": "P0",
-    "notes": "知识问答优先保证可溯源，不追求一次性大而全的自由发挥。"
+    "notes": "已将收藏夹/视频知识问答接入主 Agent 链路：`favorite_knowledge_query` 与 `video_knowledge_query` 现在会先经过知识检索节点，再由 `KnowledgeGroundedQAService` 基于 `Document + ChatPromptTemplate` 生成带来源回答；无 LLM 配置时回退到规则化 grounded answer，而不是退回通用聊天。回答默认附带 `来源:` 行，至少包含视频标题；命中具体分页时会标出 `P{page_number}`。知识库未命中时会明确返回暂无相关内容。"
   },
   {
     "id": "general-chat-fallback",

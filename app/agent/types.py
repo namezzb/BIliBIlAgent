@@ -1,4 +1,4 @@
-from typing import Literal, TypedDict
+from typing import Any, Literal, TypedDict
 
 
 IntentType = Literal["general_chat", "knowledge_query", "tool_request"]
@@ -26,6 +26,7 @@ RunEventType = Literal[
     "confirmation_resolved",
     "tool_execution_started",
     "tool_execution_finished",
+    "knowledge_retrieval_completed",
     "import_started",
     "import_selection_validated",
     "import_item_processed",
@@ -83,6 +84,7 @@ class AgentState(TypedDict, total=False):
     approval_status: Literal["approved", "rejected"] | None
     pending_actions: list[PendingAction]
     execution_plan: ExecutionPlan | None
+    retrieval_result: dict[str, Any] | None
     response: str
 
 

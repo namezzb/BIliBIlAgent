@@ -8,7 +8,11 @@ import httpx
 import pytest
 from fastapi.testclient import TestClient
 
-from app.agent.tools import build_bilibili_import_tool, build_tool_registry
+from app.agent.tools import (
+    build_bilibili_import_tool,
+    build_knowledge_retrieval_tool,
+    build_tool_registry,
+)
 from app.core.config import Settings
 from app.db.repository import SQLiteRepository
 from app.main import create_app
@@ -20,6 +24,8 @@ from app.services.bilibili_favorites import (
 )
 from app.services.bilibili_import import BilibiliImportPipeline
 from app.services.knowledge_index import KnowledgeIndexService
+from app.services.knowledge_qa import KnowledgeGroundedQAService
+from app.services.knowledge_retrieval import KnowledgeRetrievalService
 from app.services.llm import OpenAICompatibleLLM
 from app.services.runtime_audit import LangSmithRuntimeAudit
 from app.services.session_memory import SessionMemoryManager
@@ -454,10 +460,31 @@ def install_fake_knowledge_index(
         knowledge_index=client.app.state.knowledge_index,
         runtime_audit=client.app.state.runtime_audit,
     )
+    client.app.state.knowledge_retrieval = KnowledgeRetrievalService(
+        client.app.state.repository,
+        client.app.state.knowledge_index,
+    )
+    client.app.state.knowledge_retrieval_tool = build_knowledge_retrieval_tool(
+        client.app.state.knowledge_retrieval
+    )
+    client.app.state.knowledge_qa = KnowledgeGroundedQAService(
+        OpenAICompatibleLLM(
+            api_key=None,
+            base_url=None,
+            model="test-model",
+            summary_model="test-model",
+            embedding_model="test-embedding-model",
+            system_prompt="You are a helpful assistant.",
+            runtime_audit=client.app.state.runtime_audit,
+        )
+    )
     client.app.state.bilibili_import_tool = build_bilibili_import_tool(
         client.app.state.bilibili_import_pipeline
     )
     client.app.state.orchestrator.tools = build_tool_registry(client.app.state.bilibili_import_tool)
+    client.app.state.orchestrator.knowledge_retrieval_service = client.app.state.knowledge_retrieval
+    client.app.state.orchestrator.knowledge_retrieval_tool = client.app.state.knowledge_retrieval_tool
+    client.app.state.orchestrator.knowledge_qa = client.app.state.knowledge_qa
     return active_vector_index
 
 
@@ -671,6 +698,75 @@ def test_favorite_knowledge_query_route_is_exposed(tmp_path: Path) -> None:
         assert body["intent"] == "knowledge_query"
         assert body["route"] == "favorite_knowledge_query"
         assert body["status"] == "completed"
+
+
+def test_favorite_knowledge_query_returns_grounded_sources(tmp_path: Path) -> None:
+    with build_client(tmp_path) as client:
+        install_fake_knowledge_index(client)
+        client.post("/api/knowledge/debug/index", json=build_knowledge_payload())
+
+        response = client.post(
+            "/api/chat",
+            json={"message": "这个收藏夹里有哪些讲向量数据库的相关视频"},
+        )
+
+        assert response.status_code == 200
+        body = response.json()
+        assert body["route"] == "favorite_knowledge_query"
+        assert "RAG Intro" in body["reply"]
+        assert "来源:" in body["reply"]
+
+
+def test_video_knowledge_query_returns_grounded_reply_and_updates_recent_context(tmp_path: Path) -> None:
+    with build_client(tmp_path) as client:
+        install_fake_knowledge_index(client)
+        client.post("/api/knowledge/debug/index", json=build_knowledge_payload())
+
+        response = client.post("/api/chat", json={"message": "BV1RAG 这个视频讲了什么"})
+
+        assert response.status_code == 200
+        body = response.json()
+        assert body["route"] == "video_knowledge_query"
+        assert "RAG Intro" in body["reply"]
+        assert "来源:" in body["reply"]
+
+        session_detail = client.get(f"/api/sessions/{body['session_id']}").json()
+        assert session_detail["recent_context"]["last_retrieval"]["resolved_scope"]["video_ids"] == [
+            "video-rag"
+        ]
+
+
+def test_follow_up_video_query_reuses_previous_retrieval_scope(tmp_path: Path) -> None:
+    with build_client(tmp_path) as client:
+        install_fake_knowledge_index(client)
+        client.post("/api/knowledge/debug/index", json=build_knowledge_payload())
+
+        first_response = client.post("/api/chat", json={"message": "BV1RAG 这个视频讲了什么"})
+        session_id = first_response.json()["session_id"]
+
+        second_response = client.post(
+            "/api/chat",
+            json={"session_id": session_id, "message": "这个视频还讲了什么？"},
+        )
+
+        assert second_response.status_code == 200
+        body = second_response.json()
+        assert body["route"] == "video_knowledge_query"
+        assert "RAG Intro" in body["reply"]
+        assert "ASR Fallback" not in body["reply"]
+        assert "来源:" in body["reply"]
+
+
+def test_video_knowledge_query_reports_missing_content_when_index_is_empty(tmp_path: Path) -> None:
+    with build_client(tmp_path) as client:
+        install_fake_knowledge_index(client)
+
+        response = client.post("/api/chat", json={"message": "BV1NONE 这个视频讲了什么"})
+
+        assert response.status_code == 200
+        body = response.json()
+        assert body["route"] == "video_knowledge_query"
+        assert "知识库暂无相关内容" in body["reply"]
 
 
 def test_session_detail_returns_history_and_recent_context(tmp_path: Path) -> None:
@@ -1453,7 +1549,31 @@ def test_knowledge_search_returns_filtered_hits_with_source_details(tmp_path: Pa
             "fav-db"
         }
         assert first_hit["source_type"] == "subtitle"
+        assert first_hit["pages"][0]["page_number"] == 1
         assert "page" not in first_hit
+
+
+def test_knowledge_search_supports_page_number_filters(tmp_path: Path) -> None:
+    with build_client(tmp_path) as client:
+        install_fake_knowledge_index(client, chunk_size=1000, chunk_overlap=200)
+        client.post("/api/knowledge/debug/index", json=build_long_knowledge_payload())
+
+        response = client.post(
+            "/api/knowledge/search",
+            json={
+                "query": "BBBB",
+                "page_numbers": [2],
+                "top_k": 10,
+            },
+        )
+
+        assert response.status_code == 200
+        body = response.json()
+        assert body["total_hits"] >= 1
+        assert all(
+            any(page["page_number"] == 2 for page in hit["pages"])
+            for hit in body["hits"]
+        )
 
 
 def test_knowledge_search_returns_empty_hits_when_index_is_empty(tmp_path: Path) -> None:

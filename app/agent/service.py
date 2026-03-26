@@ -1,6 +1,7 @@
 from copy import deepcopy
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 from langgraph.checkpoint.sqlite import SqliteSaver
 from langgraph.graph import END, START, StateGraph
@@ -17,6 +18,8 @@ from app.agent.types import (
     RouteType,
 )
 from app.db.repository import SQLiteRepository
+from app.services.knowledge_qa import KnowledgeGroundedQAService
+from app.services.knowledge_retrieval import KnowledgeRetrievalService
 from app.services.llm import OpenAICompatibleLLM
 from app.services.runtime_audit import LangSmithRuntimeAudit
 from app.services.user_memory import UserMemoryManager
@@ -31,12 +34,18 @@ class AgentOrchestrator:
         user_memory: UserMemoryManager,
         runtime_audit: LangSmithRuntimeAudit,
         tool_registry: dict[tuple[str, str], Any],
+        knowledge_retrieval_service: KnowledgeRetrievalService,
+        knowledge_retrieval_tool: Any,
+        knowledge_qa: KnowledgeGroundedQAService,
     ) -> None:
         self.repository = repository
         self.llm = llm
         self.user_memory = user_memory
         self.runtime_audit = runtime_audit
         self.tools = tool_registry
+        self.knowledge_retrieval_service = knowledge_retrieval_service
+        self.knowledge_retrieval_tool = knowledge_retrieval_tool
+        self.knowledge_qa = knowledge_qa
         self._checkpointer_cm = SqliteSaver.from_conn_string(str(checkpoint_db_path))
         self.checkpointer = self._checkpointer_cm.__enter__()
         self.graph = self._build_graph()
@@ -86,7 +95,7 @@ class AgentOrchestrator:
                     "message": message,
                 },
             )
-            self.graph.invoke(
+            final_state = self.graph.invoke(
                 {
                     "session_id": session_id,
                     "user_id": user_id,
@@ -104,6 +113,8 @@ class AgentOrchestrator:
                 config={"configurable": {"thread_id": run_id}},
             )
             result = self._build_sync_response(run_id, session_id)
+            if isinstance(final_state, dict) and final_state.get("retrieval_result") is not None:
+                result["retrieval_result"] = final_state["retrieval_result"]
             trace_run.add_metadata(
                 {
                     "intent": result.get("intent"),
@@ -140,11 +151,13 @@ class AgentOrchestrator:
             },
             tags=["agent", "confirm", self.runtime_audit.environment],
         ) as trace_run:
-            self.graph.invoke(
+            final_state = self.graph.invoke(
                 Command(resume={"approved": approved}),
                 config={"configurable": {"thread_id": run_id}},
             )
             result = self._build_sync_response(run_id, session_id)
+            if isinstance(final_state, dict) and final_state.get("retrieval_result") is not None:
+                result["retrieval_result"] = final_state["retrieval_result"]
             trace_run.add_metadata(
                 {
                     "intent": result.get("intent"),
@@ -163,6 +176,7 @@ class AgentOrchestrator:
         builder = StateGraph(AgentState)
         builder.add_node("load_context", self._load_context)
         builder.add_node("classify_intent", self._classify_intent)
+        builder.add_node("retrieve_knowledge", self._retrieve_knowledge)
         builder.add_node("plan_or_answer", self._plan_or_answer)
         builder.add_node("approval_gate", self._approval_gate)
         builder.add_node("execute_tools", self._execute_tools)
@@ -170,7 +184,15 @@ class AgentOrchestrator:
 
         builder.add_edge(START, "load_context")
         builder.add_edge("load_context", "classify_intent")
-        builder.add_edge("classify_intent", "plan_or_answer")
+        builder.add_conditional_edges(
+            "classify_intent",
+            self._route_after_classification,
+            {
+                "retrieve_knowledge": "retrieve_knowledge",
+                "plan_or_answer": "plan_or_answer",
+            },
+        )
+        builder.add_edge("retrieve_knowledge", "plan_or_answer")
         builder.add_conditional_edges(
             "plan_or_answer",
             self._route_after_plan,
@@ -204,6 +226,11 @@ class AgentOrchestrator:
         if state.get("requires_confirmation"):
             return "approval_gate"
         return "finalize_run"
+
+    def _route_after_classification(self, state: AgentState) -> str:
+        if state.get("intent") == "knowledge_query":
+            return "retrieve_knowledge"
+        return "plan_or_answer"
 
     def _route_after_approval(self, state: AgentState) -> str:
         if state.get("approval_status") == "approved":
@@ -276,6 +303,66 @@ class AgentOrchestrator:
             trace_run.end(outputs={"event": payload, "result": result})
             return result
 
+    def _retrieve_knowledge(self, state: AgentState) -> dict[str, Any]:
+        with self.runtime_audit.trace_span(
+            name="agent.retrieve_knowledge",
+            run_type="tool",
+            inputs={
+                "run_id": state["run_id"],
+                "route": state.get("route"),
+                "message": state["current_message"],
+                "recent_context": state.get("recent_context", {}),
+            },
+            metadata=self._span_metadata(state),
+            tags=["agent", "knowledge", "retrieval"],
+        ) as trace_run:
+            tool_message = self.knowledge_retrieval_tool.invoke(
+                {
+                    "type": "tool_call",
+                    "name": "knowledge_retrieval",
+                    "id": f"knowledge-retrieval-{uuid4()}",
+                    "args": {
+                        "message": state["current_message"],
+                        "route": state.get("route"),
+                        "recent_context": state.get("recent_context", {}),
+                        "top_k": 5,
+                    },
+                }
+            )
+            artifact = tool_message.artifact if isinstance(getattr(tool_message, "artifact", None), dict) else {}
+            retrieval_result = {
+                "query": artifact.get("query", state["current_message"]),
+                "route": artifact.get("route", state.get("route")),
+                "resolved_scope": artifact.get("resolved_scope", {}),
+                "total_hits": artifact.get("total_hits", 0),
+                "hits": artifact.get("hits", []),
+                "serialized_context": str(tool_message.content),
+                "top_sources": artifact.get("top_sources", []),
+            }
+
+            output_summary = (
+                f"retrieved {retrieval_result['total_hits']} hit(s); "
+                f"sources={', '.join(retrieval_result.get('top_sources', [])) or 'none'}"
+            )
+            self.repository.upsert_run_step(
+                state["run_id"],
+                "knowledge_retrieval",
+                "knowledge_retrieval",
+                "completed",
+                input_summary=state["current_message"],
+                output_summary=output_summary,
+            )
+            payload = {
+                "route": state.get("route"),
+                "query": retrieval_result["query"],
+                "total_hits": retrieval_result["total_hits"],
+                "resolved_scope": retrieval_result["resolved_scope"],
+                "top_sources": retrieval_result["top_sources"],
+            }
+            self._emit_event(state["run_id"], "knowledge_retrieval_completed", payload)
+            trace_run.end(outputs={"event": payload, "result": payload})
+            return {"retrieval_result": retrieval_result}
+
     def _plan_or_answer(self, state: AgentState) -> dict[str, Any]:
         with self.runtime_audit.trace_span(
             name="agent.plan_or_answer",
@@ -342,14 +429,16 @@ class AgentOrchestrator:
                         state["run_id"],
                     )
             elif route == "favorite_knowledge_query":
-                response = (
-                    "Favorite-folder knowledge query is recognized, but the retrieval chain "
-                    "is not connected yet."
+                retrieval_result = state.get("retrieval_result") or {}
+                response = self.knowledge_qa.answer(
+                    question=state["current_message"],
+                    retrieval_result=retrieval_result,
                 )
             elif route == "video_knowledge_query":
-                response = (
-                    "Single-video knowledge query is recognized, but the retrieval chain "
-                    "is not connected yet."
+                retrieval_result = state.get("retrieval_result") or {}
+                response = self.knowledge_qa.answer(
+                    question=state["current_message"],
+                    retrieval_result=retrieval_result,
                 )
             else:
                 extra_system_messages = []
@@ -381,6 +470,7 @@ class AgentOrchestrator:
                 "execution_plan": None,
                 "requires_confirmation": False,
                 "status": "completed",
+                "retrieval_result": state.get("retrieval_result"),
                 "response": response,
             }
             trace_run.end(outputs={"event": payload, "result": result})

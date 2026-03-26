@@ -27,6 +27,7 @@ class SQLiteRepository:
             self._ensure_runs_langsmith_columns(connection)
             self._ensure_runs_execution_plan_columns(connection)
             self._ensure_knowledge_text_chunks_video_schema(connection)
+            self._ensure_knowledge_chunk_pages_schema(connection)
             connection.commit()
 
     def _ensure_sessions_user_id_column(self, connection: sqlite3.Connection) -> None:
@@ -104,6 +105,24 @@ class SQLiteRepository:
             """
         )
         connection.execute("DROP TABLE knowledge_text_chunks_legacy")
+
+    def _ensure_knowledge_chunk_pages_schema(self, connection: sqlite3.Connection) -> None:
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS knowledge_chunk_pages (
+                chunk_id TEXT NOT NULL,
+                page_id TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                PRIMARY KEY (chunk_id, page_id)
+            )
+            """
+        )
+        connection.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_knowledge_chunk_pages_page_id
+            ON knowledge_chunk_pages (page_id)
+            """
+        )
 
     def _connect(self) -> sqlite3.Connection:
         connection = sqlite3.connect(self.db_path)
@@ -384,6 +403,7 @@ class SQLiteRepository:
         favorite_video_links: list[dict[str, str]],
         pages: list[dict[str, Any]],
         chunks: list[dict[str, Any]],
+        chunk_page_links: list[dict[str, str]],
     ) -> None:
         timestamp = utc_now()
 
@@ -531,6 +551,30 @@ class SQLiteRepository:
                     ),
                 )
 
+            if chunk_page_links:
+                distinct_chunk_ids = sorted({str(link["chunk_id"]) for link in chunk_page_links})
+                placeholders = ", ".join("?" for _ in distinct_chunk_ids)
+                connection.execute(
+                    f"DELETE FROM knowledge_chunk_pages WHERE chunk_id IN ({placeholders})",
+                    distinct_chunk_ids,
+                )
+                for link in chunk_page_links:
+                    connection.execute(
+                        """
+                        INSERT INTO knowledge_chunk_pages (
+                            chunk_id,
+                            page_id,
+                            created_at
+                        ) VALUES (?, ?, ?)
+                        ON CONFLICT(chunk_id, page_id) DO NOTHING
+                        """,
+                        (
+                            link["chunk_id"],
+                            link["page_id"],
+                            timestamp,
+                        ),
+                    )
+
             connection.commit()
 
     def get_existing_knowledge_video_ids(self, video_ids: list[str]) -> list[str]:
@@ -549,6 +593,28 @@ class SQLiteRepository:
                 video_ids,
             ).fetchall()
         return [str(row["video_id"]) for row in rows]
+
+    def list_knowledge_favorite_folders(self) -> list[dict[str, Any]]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT favorite_folder_id, title, intro
+                FROM knowledge_favorite_folders
+                ORDER BY title COLLATE NOCASE ASC
+                """
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def list_knowledge_videos(self) -> list[dict[str, Any]]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT video_id, bvid, title
+                FROM knowledge_videos
+                ORDER BY title COLLATE NOCASE ASC
+                """
+            ).fetchall()
+        return [dict(row) for row in rows]
 
     def get_knowledge_chunk_details(self, chunk_ids: list[str]) -> list[dict[str, Any]]:
         if not chunk_ids:
@@ -576,11 +642,16 @@ class SQLiteRepository:
                     v.title AS video_title,
                     f.favorite_folder_id,
                     f.title AS favorite_folder_title,
-                    f.intro AS favorite_folder_intro
+                    f.intro AS favorite_folder_intro,
+                    p.page_id,
+                    p.page_number,
+                    p.title AS page_title
                 FROM knowledge_text_chunks c
                 JOIN knowledge_videos v ON v.video_id = c.video_id
                 LEFT JOIN knowledge_favorite_videos fv ON fv.video_id = v.video_id
                 LEFT JOIN knowledge_favorite_folders f ON f.favorite_folder_id = fv.favorite_folder_id
+                LEFT JOIN knowledge_chunk_pages cp ON cp.chunk_id = c.chunk_id
+                LEFT JOIN knowledge_video_pages p ON p.page_id = cp.page_id
                 WHERE c.chunk_id IN ({placeholders})
                 ORDER BY c.chunk_id ASC
                 """,
@@ -588,6 +659,8 @@ class SQLiteRepository:
             ).fetchall()
 
         grouped: dict[str, dict[str, Any]] = {}
+        favorite_folder_ids_by_chunk: dict[str, set[str]] = {}
+        page_ids_by_chunk: dict[str, set[str]] = {}
         for row in rows:
             chunk_id = str(row["chunk_id"])
             if chunk_id not in grouped:
@@ -610,15 +683,36 @@ class SQLiteRepository:
                         "title": row["video_title"],
                     },
                     "favorite_folders": [],
+                    "pages": [],
                 }
+                favorite_folder_ids_by_chunk[chunk_id] = set()
+                page_ids_by_chunk[chunk_id] = set()
             if row["favorite_folder_id"] is not None:
-                grouped[chunk_id]["favorite_folders"].append(
-                    {
-                        "favorite_folder_id": row["favorite_folder_id"],
-                        "title": row["favorite_folder_title"],
-                        "intro": row["favorite_folder_intro"],
-                    }
-                )
+                favorite_folder_id = str(row["favorite_folder_id"])
+                if favorite_folder_id not in favorite_folder_ids_by_chunk[chunk_id]:
+                    favorite_folder_ids_by_chunk[chunk_id].add(favorite_folder_id)
+                    grouped[chunk_id]["favorite_folders"].append(
+                        {
+                            "favorite_folder_id": favorite_folder_id,
+                            "title": row["favorite_folder_title"],
+                            "intro": row["favorite_folder_intro"],
+                        }
+                    )
+            if row["page_id"] is not None:
+                page_id = str(row["page_id"])
+                if page_id not in page_ids_by_chunk[chunk_id]:
+                    page_ids_by_chunk[chunk_id].add(page_id)
+                    grouped[chunk_id]["pages"].append(
+                        {
+                            "page_id": page_id,
+                            "page_number": int(row["page_number"]),
+                            "title": row["page_title"],
+                        }
+                    )
+
+        for detail in grouped.values():
+            detail["favorite_folders"].sort(key=lambda item: str(item["favorite_folder_id"]))
+            detail["pages"].sort(key=lambda item: (int(item["page_number"]), str(item["page_id"])))
 
         return [grouped[chunk_id] for chunk_id in chunk_ids if chunk_id in grouped]
 

@@ -3,7 +3,11 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from langsmith.middleware import TracingMiddleware
 
-from app.agent.tools import build_bilibili_import_tool, build_tool_registry
+from app.agent.tools import (
+    build_bilibili_import_tool,
+    build_knowledge_retrieval_tool,
+    build_tool_registry,
+)
 from app.agent.service import AgentOrchestrator
 from app.api.routes.chat import router as chat_router
 from app.core.config import Settings, get_settings
@@ -11,6 +15,8 @@ from app.db.repository import SQLiteRepository
 from app.services.bilibili_favorites import BilibiliFavoriteFolderService
 from app.services.bilibili_import import BilibiliImportPipeline
 from app.services.knowledge_index import ChromaVectorIndex, KnowledgeIndexService
+from app.services.knowledge_qa import KnowledgeGroundedQAService
+from app.services.knowledge_retrieval import KnowledgeRetrievalService
 from app.services.llm import OpenAICompatibleLLM
 from app.services.runtime_audit import LangSmithRuntimeAudit
 from app.services.session_memory import SessionMemoryManager
@@ -61,6 +67,9 @@ async def lifespan(app: FastAPI):
         knowledge_index=knowledge_index,
         runtime_audit=runtime_audit,
     )
+    knowledge_retrieval_service = KnowledgeRetrievalService(repository, knowledge_index)
+    knowledge_retrieval_tool = build_knowledge_retrieval_tool(knowledge_retrieval_service)
+    knowledge_qa = KnowledgeGroundedQAService(llm)
     bilibili_import_tool = build_bilibili_import_tool(bilibili_import_pipeline)
     orchestrator = AgentOrchestrator(
         repository=repository,
@@ -69,6 +78,9 @@ async def lifespan(app: FastAPI):
         user_memory=user_memory,
         runtime_audit=runtime_audit,
         tool_registry=build_tool_registry(bilibili_import_tool),
+        knowledge_retrieval_service=knowledge_retrieval_service,
+        knowledge_retrieval_tool=knowledge_retrieval_tool,
+        knowledge_qa=knowledge_qa,
     )
     session_memory = SessionMemoryManager(repository, llm)
 
@@ -80,6 +92,9 @@ async def lifespan(app: FastAPI):
     app.state.bilibili_import_pipeline = bilibili_import_pipeline
     app.state.bilibili_import_tool = bilibili_import_tool
     app.state.knowledge_index = knowledge_index
+    app.state.knowledge_retrieval = knowledge_retrieval_service
+    app.state.knowledge_retrieval_tool = knowledge_retrieval_tool
+    app.state.knowledge_qa = knowledge_qa
     app.state.runtime_audit = runtime_audit
 
     try:

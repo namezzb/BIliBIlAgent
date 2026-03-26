@@ -188,6 +188,7 @@ def chat(request: Request, payload: ChatRequest) -> ChatResponse:
         status=result["status"],
         reply=result["reply"],
         pending_actions=result["pending_actions"],
+        retrieval_result=result.get("retrieval_result"),
     )
     return ChatResponse(**result)
 
@@ -238,6 +239,7 @@ def confirm_run(
         status=result["status"],
         reply=result["reply"],
         pending_actions=result["pending_actions"],
+        retrieval_result=result.get("retrieval_result"),
     )
     return ChatResponse(**result)
 
@@ -564,9 +566,9 @@ def search_knowledge(
     payload: KnowledgeSearchRequest,
     request: Request,
 ) -> KnowledgeSearchResponse:
-    knowledge_index = request.app.state.knowledge_index
+    knowledge_retrieval = request.app.state.knowledge_retrieval
     try:
-        result = knowledge_index.search(payload.model_dump())
+        result = knowledge_retrieval.search(payload.model_dump())
     except RuntimeError as exc:
         raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)) from exc
     return KnowledgeSearchResponse(**result)

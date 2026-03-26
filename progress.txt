@@ -252,3 +252,19 @@ Blockers:
 - None.
 Next step:
 - Implement `knowledge-retrieval`, now that selected-video import, subtitle text indexing, and ASR fallback preparation are all wired into the runtime import path.
+
+2026-03-26 00:35 CST
+Current goal: Implement `knowledge-retrieval` and `knowledge-grounded-qa` as the next unfinished P0 features in `feature_list.json`.
+Completed:
+- Added page-aware knowledge retrieval on top of the existing `SQLite + Chroma` index by introducing `knowledge_chunk_pages`, persisting chunk-to-page coverage during indexing, and returning page provenance from `/api/knowledge/search`.
+- Added `KnowledgeRetrievalService` plus a LangChain structured `knowledge_retrieval` tool that resolves retrieval scope from message text, known favorite-folder/video titles, `BV` identifiers, page markers, and `recent_context.last_retrieval`.
+- Wired knowledge queries into the LangGraph orchestration flow with a dedicated retrieval node, `knowledge_retrieval` run step/event summaries, and session-memory persistence of the latest retrieval scope/top sources.
+- Added `KnowledgeGroundedQAService` using `Document + ChatPromptTemplate` so `favorite_knowledge_query` and `video_knowledge_query` now return source-grounded replies instead of placeholder text; no-hit cases now respond with an explicit knowledge-miss message.
+- Extended tests to cover grounded favorite/video answers, follow-up scope reuse, page-number filtering, empty-index knowledge replies, and the updated `/api/knowledge/search` payload/response contract.
+- Verified the full backend suite with `poetry run pytest -q` (`51 passed`).
+In progress:
+- None.
+Blockers:
+- None.
+Next step:
+- Implement `general-chat-fallback`, so non-knowledge or knowledge-miss turns can deliberately fall back to general chat policy instead of relying only on route classification.

@@ -260,6 +260,7 @@ class KnowledgeSearchRequest(BaseModel):
     top_k: int = Field(default=5, ge=1, le=20)
     favorite_folder_ids: list[str] = Field(default_factory=list)
     video_ids: list[str] = Field(default_factory=list)
+    page_numbers: list[int] = Field(default_factory=list)
     source_types: list[Literal["subtitle", "asr"]] = Field(default_factory=list)
 
 
@@ -275,6 +276,12 @@ class KnowledgeVideoResponse(BaseModel):
     title: str
 
 
+class KnowledgeVideoPageResponse(BaseModel):
+    page_id: str
+    page_number: int
+    title: str
+
+
 class KnowledgeSearchHitResponse(BaseModel):
     score: float
     chunk_id: str
@@ -284,6 +291,7 @@ class KnowledgeSearchHitResponse(BaseModel):
     start_ms: int | None = None
     end_ms: int | None = None
     favorite_folders: list[KnowledgeFavoriteFolderResponse] = Field(default_factory=list)
+    pages: list[KnowledgeVideoPageResponse] = Field(default_factory=list)
     video: KnowledgeVideoResponse
 
 

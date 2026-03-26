@@ -41,7 +41,9 @@ class SessionMemoryManager:
         status: str,
         reply: str,
         pending_actions: list[dict[str, Any]],
+        retrieval_result: dict[str, Any] | None = None,
     ) -> None:
+        session = self.repository.get_session(session_id) or {}
         messages = self.repository.get_messages(session_id)
         summary_text = self._build_summary(messages)
         recent_context = {
@@ -54,6 +56,16 @@ class SessionMemoryManager:
             "last_pending_actions": pending_actions,
             "message_count": len(messages),
         }
+        if retrieval_result is not None:
+            recent_context["last_retrieval"] = {
+                "query": retrieval_result.get("query"),
+                "route": retrieval_result.get("route"),
+                "resolved_scope": retrieval_result.get("resolved_scope", {}),
+                "total_hits": retrieval_result.get("total_hits", 0),
+                "top_sources": retrieval_result.get("top_sources", []),
+            }
+        elif isinstance(session.get("recent_context"), dict) and session["recent_context"].get("last_retrieval"):
+            recent_context["last_retrieval"] = session["recent_context"]["last_retrieval"]
         self.repository.update_session_memory(
             session_id,
             summary_text=summary_text,

@@ -4,6 +4,7 @@ from pathlib import Path
 from typing import Any, Callable, Protocol
 
 import chromadb
+from langchain_core.documents import Document
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 
 from app.db.repository import SQLiteRepository
@@ -94,6 +95,7 @@ class KnowledgeIndexService:
             chunk_size=self.chunk_size,
             chunk_overlap=self.chunk_overlap,
             length_function=len,
+            add_start_index=True,
             is_separator_regex=False,
             separators=[
                 "\n\n",
@@ -129,6 +131,7 @@ class KnowledgeIndexService:
         favorite_video_links: list[dict[str, str]] = []
         pages: list[dict[str, Any]] = []
         chunks: list[dict[str, Any]] = []
+        chunk_page_links: list[dict[str, str]] = []
         vector_ids: list[str] = []
         vector_texts: list[str] = []
         vector_metadatas: list[dict[str, Any]] = []
@@ -174,32 +177,17 @@ class KnowledgeIndexService:
             )
 
             page_items.sort(key=lambda item: int(item["page_number"]))
-            aggregated_text_parts: list[str] = []
-            source_types: set[str] = set()
-            source_languages: set[str] = set()
-
-            for page in page_items:
-                page_text_parts: list[str] = []
-                for block in page.get("text_blocks", []):
-                    block_text = str(block["text"]).strip()
-                    if not block_text:
-                        continue
-                    page_text_parts.append(block_text)
-                    source_types.add(str(block["source_type"]))
-                    language = block.get("source_language")
-                    if language:
-                        source_languages.add(str(language))
-                if page_text_parts:
-                    aggregated_text_parts.append("\n".join(page_text_parts))
-
-            full_text = "\n".join(aggregated_text_parts).strip()
+            full_text, page_spans, source_types, source_languages = self._build_video_text(page_items)
             if not full_text:
                 raise ValueError(f"Video {video_id} has no usable text blocks for indexing.")
 
             source_type = self._aggregate_source_type(source_types)
             source_language = self._aggregate_source_language(source_languages)
 
-            for chunk_index, chunk_text in enumerate(self._chunk_text(full_text)):
+            for chunk_index, document in enumerate(self._chunk_text(full_text)):
+                chunk_text = document.page_content.strip()
+                chunk_start = int(document.metadata.get("start_index", 0))
+                chunk_end = chunk_start + len(chunk_text)
                 chunk_id = f"{video_id}:chunk:{chunk_index}"
                 vector_document_id = f"{self.embedding_version}:{chunk_id}"
                 chunks.append(
@@ -217,6 +205,14 @@ class KnowledgeIndexService:
                         "index_status": "indexed",
                         "vector_document_id": vector_document_id,
                     }
+                )
+                chunk_page_links.extend(
+                    {
+                        "chunk_id": chunk_id,
+                        "page_id": str(page["page_id"]),
+                    }
+                    for page in page_spans
+                    if chunk_start < int(page["end_index"]) and chunk_end > int(page["start_index"])
                 )
                 vector_ids.append(vector_document_id)
                 vector_texts.append(chunk_text)
@@ -251,6 +247,7 @@ class KnowledgeIndexService:
                 favorite_video_links=favorite_video_links,
                 pages=pages,
                 chunks=chunks,
+                chunk_page_links=chunk_page_links,
             )
         except Exception:
             self._safe_delete_vectors(vector_ids)
@@ -309,6 +306,7 @@ class KnowledgeIndexService:
                     "start_ms": detail["start_ms"],
                     "end_ms": detail["end_ms"],
                     "favorite_folders": detail["favorite_folders"],
+                    "pages": detail.get("pages", []),
                     "video": detail["video"],
                 }
             )
@@ -321,16 +319,66 @@ class KnowledgeIndexService:
             "hits": filtered_hits,
         }
 
-    def _chunk_text(self, text: str) -> list[str]:
+    def _build_video_text(
+        self,
+        page_items: list[dict[str, Any]],
+    ) -> tuple[str, list[dict[str, Any]], set[str], set[str]]:
+        full_text_parts: list[str] = []
+        page_spans: list[dict[str, Any]] = []
+        source_types: set[str] = set()
+        source_languages: set[str] = set()
+        cursor = 0
+
+        for page in page_items:
+            page_text_parts: list[str] = []
+            for block in page.get("text_blocks", []):
+                block_text = str(block["text"]).strip()
+                if not block_text:
+                    continue
+                page_text_parts.append(block_text)
+                source_types.add(str(block["source_type"]))
+                language = block.get("source_language")
+                if language:
+                    source_languages.add(str(language))
+
+            page_text = "\n".join(page_text_parts).strip()
+            if not page_text:
+                continue
+
+            if full_text_parts:
+                full_text_parts.append("\n")
+                cursor += 1
+
+            start_index = cursor
+            full_text_parts.append(page_text)
+            cursor += len(page_text)
+            page_spans.append(
+                {
+                    "page_id": str(page["page_id"]),
+                    "page_number": int(page["page_number"]),
+                    "title": page["title"],
+                    "start_index": start_index,
+                    "end_index": cursor,
+                }
+            )
+
+        return "".join(full_text_parts), page_spans, source_types, source_languages
+
+    def _chunk_text(self, text: str) -> list[Document]:
         content = text.strip()
         if not content:
             return []
-        return [chunk.strip() for chunk in self.text_splitter.split_text(content) if chunk.strip()]
+        return [
+            document
+            for document in self.text_splitter.create_documents([content])
+            if document.page_content.strip()
+        ]
 
     def _matches_filters(self, detail: dict[str, Any], payload: dict[str, Any]) -> bool:
         favorite_folder_ids = {str(item) for item in payload.get("favorite_folder_ids", [])}
         video_ids = {str(item) for item in payload.get("video_ids", [])}
         source_types = {str(item) for item in payload.get("source_types", [])}
+        page_numbers = {int(item) for item in payload.get("page_numbers", [])}
 
         if favorite_folder_ids:
             detail_folder_ids = {
@@ -342,6 +390,12 @@ class KnowledgeIndexService:
             return False
         if source_types and str(detail["source_type"]) not in source_types:
             return False
+        if page_numbers:
+            detail_page_numbers = {
+                int(page["page_number"]) for page in detail.get("pages", []) if page.get("page_number") is not None
+            }
+            if not detail_page_numbers.intersection(page_numbers):
+                return False
         return True
 
     def _aggregate_source_type(self, source_types: set[str]) -> str:

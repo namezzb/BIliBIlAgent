@@ -162,4 +162,16 @@ SCHEMA_STATEMENTS = [
     CREATE INDEX IF NOT EXISTS idx_knowledge_text_chunks_video_id
     ON knowledge_text_chunks (video_id)
     """,
+    """
+    CREATE TABLE IF NOT EXISTS knowledge_chunk_pages (
+        chunk_id TEXT NOT NULL,
+        page_id TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        PRIMARY KEY (chunk_id, page_id)
+    )
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_knowledge_chunk_pages_page_id
+    ON knowledge_chunk_pages (page_id)
+    """,
 ]
