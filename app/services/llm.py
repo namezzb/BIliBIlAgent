@@ -1,7 +1,16 @@
 from openai import OpenAI
-from langsmith.wrappers import wrap_openai
+from app.services.runtime_audit import LangSmithRuntimeAudit, NoOpRuntimeAudit
 
-from app.services.runtime_audit import LangSmithRuntimeAudit
+
+def _maybe_wrap_openai(client: OpenAI, runtime_audit) -> OpenAI:
+    """Only wrap with LangSmith if tracing is active."""
+    if isinstance(runtime_audit, NoOpRuntimeAudit):
+        return client
+    try:
+        from langsmith.wrappers import wrap_openai
+        return wrap_openai(client)
+    except Exception:
+        return client
 
 
 class OpenAICompatibleLLM:
@@ -27,12 +36,15 @@ class OpenAICompatibleLLM:
 
     def _get_client(self) -> OpenAI:
         if self._client is None:
-            client_kwargs: dict[str, str] = {}
+            import httpx
+            client_kwargs: dict = {
+                "http_client": httpx.Client(proxy=None, trust_env=False),
+            }
             if self.api_key:
                 client_kwargs["api_key"] = self.api_key
             if self.base_url:
                 client_kwargs["base_url"] = self.base_url
-            self._client = wrap_openai(OpenAI(**client_kwargs))
+            self._client = _maybe_wrap_openai(OpenAI(**client_kwargs), self.runtime_audit)
         return self._client
 
     def chat(

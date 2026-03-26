@@ -1,6 +1,7 @@
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 from langsmith.middleware import TracingMiddleware
 
 from app.agent.tools import (
@@ -18,7 +19,7 @@ from app.services.knowledge_index import ChromaVectorIndex, KnowledgeIndexServic
 from app.services.knowledge_qa import KnowledgeGroundedQAService
 from app.services.knowledge_retrieval import KnowledgeRetrievalService
 from app.services.llm import OpenAICompatibleLLM
-from app.services.runtime_audit import LangSmithRuntimeAudit
+from app.services.runtime_audit import LangSmithRuntimeAudit, NoOpRuntimeAudit
 from app.services.session_memory import SessionMemoryManager
 from app.services.user_memory import UserMemoryManager
 
@@ -28,16 +29,21 @@ async def lifespan(app: FastAPI):
     settings: Settings = app.state.settings
     repository = SQLiteRepository(settings.app_db_path)
     repository.initialize()
-    runtime_audit = app.state.runtime_audit or LangSmithRuntimeAudit(
-        enabled=settings.langsmith_tracing,
-        api_key=settings.langsmith_api_key,
-        project_name=settings.langsmith_project,
-        endpoint=settings.langsmith_endpoint,
-        workspace_id=settings.langsmith_workspace_id,
-        web_url=settings.langsmith_web_url,
-        app_name=settings.app_name,
-        environment=settings.environment,
-    )
+    if app.state.runtime_audit:
+        runtime_audit = app.state.runtime_audit
+    elif settings.langsmith_tracing and settings.langsmith_api_key and settings.langsmith_project:
+        runtime_audit = LangSmithRuntimeAudit(
+            enabled=settings.langsmith_tracing,
+            api_key=settings.langsmith_api_key,
+            project_name=settings.langsmith_project,
+            endpoint=settings.langsmith_endpoint,
+            workspace_id=settings.langsmith_workspace_id,
+            web_url=settings.langsmith_web_url,
+            app_name=settings.app_name,
+            environment=settings.environment,
+        )
+    else:
+        runtime_audit = NoOpRuntimeAudit()
     llm = OpenAICompatibleLLM(
         api_key=settings.llm_api_key,
         base_url=settings.llm_base_url,
@@ -120,6 +126,13 @@ def create_app(
     )
     app.state.settings = app_settings
     app.state.runtime_audit = runtime_audit
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
     app.add_middleware(TracingMiddleware)
     app.include_router(chat_router)
 

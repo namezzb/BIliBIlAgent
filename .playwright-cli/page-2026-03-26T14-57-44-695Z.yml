@@ -1,0 +1,61 @@
+- generic [ref=e3]:
+  - complementary [ref=e4]:
+    - generic [ref=e5]:
+      - generic [ref=e6]: B
+      - generic [ref=e7]:
+        - text: BIliBIl
+        - text: Agent
+    - navigation [ref=e8]:
+      - link "⊞ 收藏夹" [ref=e9] [cursor=pointer]:
+        - /url: /
+        - generic [ref=e10]: ⊞
+        - text: 收藏夹
+      - link "◎ 对话" [ref=e11] [cursor=pointer]:
+        - /url: /chat
+        - generic [ref=e12]: ◎
+        - text: 对话
+      - link "⬡ 记忆" [ref=e13] [cursor=pointer]:
+        - /url: /memory
+        - generic [ref=e14]: ⬡
+        - text: 记忆
+    - button "退出登录" [ref=e16] [cursor=pointer]
+  - main [ref=e17]:
+    - generic [ref=e18]:
+      - generic [ref=e20]:
+        - heading "长期记忆" [level=1] [ref=e21]
+        - paragraph [ref=e22]: 管理 Agent 为你保存的偏好与设置
+      - generic [ref=e23]:
+        - generic [ref=e24]: 用户 ID
+        - generic [ref=e25]:
+          - textbox "输入用户 ID（如 user_001）" [ref=e26]: user_test_001
+          - button "加载记忆" [ref=e27] [cursor=pointer]
+        - paragraph [ref=e28]: 用户 ID 保存在本地，用于跨会话恢复长期记忆
+      - generic [ref=e29]:
+        - generic [ref=e30]:
+          - generic [ref=e31]:
+            - generic [ref=e32]:
+              - heading "偏好设置" [level=3] [ref=e33]
+              - paragraph [ref=e34]: 语言偏好、回答风格等
+            - button "+ 添加" [ref=e35] [cursor=pointer]
+          - generic [ref=e56]:
+            - generic [ref=e57]:
+              - generic [ref=e58]: 回答语言
+              - generic [ref=e59]: →
+              - generic [ref=e60]: 中文
+            - generic [ref=e61]:
+              - generic [ref=e62]: api
+              - button "删除" [ref=e63] [cursor=pointer]
+        - generic [ref=e37]:
+          - generic [ref=e38]:
+            - generic [ref=e39]:
+              - heading "别名映射" [level=3] [ref=e40]
+              - paragraph [ref=e41]: 自定义名称 → 收藏夹/视频 ID
+            - button "+ 添加" [ref=e42] [cursor=pointer]
+          - paragraph [ref=e43]: 暂无记录
+        - generic [ref=e44]:
+          - generic [ref=e45]:
+            - generic [ref=e46]:
+              - heading "默认范围" [level=3] [ref=e47]
+              - paragraph [ref=e48]: 默认检索的收藏夹范围
+            - button "+ 添加" [ref=e49] [cursor=pointer]
+          - paragraph [ref=e50]: 暂无记录

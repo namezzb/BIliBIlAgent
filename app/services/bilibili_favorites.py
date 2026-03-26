@@ -471,6 +471,8 @@ class BilibiliFavoriteFolderService:
                 timeout=self.timeout,
                 follow_redirects=True,
                 transport=self.transport,
+                proxy=None,
+                trust_env=False,
             ) as client:
                 response = client.request(method, url, params=params)
         except httpx.TimeoutException as exc:

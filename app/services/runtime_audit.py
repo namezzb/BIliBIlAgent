@@ -158,3 +158,45 @@ class LangSmithRuntimeAudit:
         if callable(get_url):
             return str(get_url())
         return None
+
+
+class NoOpRuntimeAudit:
+    """Drop-in replacement used when LangSmith is disabled (local dev)."""
+
+    def __init__(self) -> None:
+        self.app_name = "BIliBIlAgent"
+        self.environment = "development"
+
+    def close(self) -> None:
+        pass
+
+    @contextmanager
+    def trace_request(self, *, name: str, inputs: dict, metadata: dict, tags=None) -> Iterator[Any]:
+        yield _NoOpRun()
+
+    @contextmanager
+    def trace_span(self, *, name: str, run_type: str, inputs: dict, metadata=None, tags=None) -> Iterator[Any]:
+        yield _NoOpRun()
+
+    def build_reference(self, *, run_id: str, trace_run: Any, existing_url=None) -> dict:
+        return {"langsmith_thread_id": run_id, "langsmith_thread_url": None}
+
+    def sanitize_payload(self, value: Any) -> Any:
+        return value
+
+
+class _NoOpRun:
+    def end(self, *args, **kwargs) -> None:
+        pass
+
+    def add_metadata(self, *args, **kwargs) -> None:
+        pass
+
+    def patch(self, *args, **kwargs) -> None:
+        pass
+
+    def __getattr__(self, name: str):
+        """Silently absorb any other method calls LangSmith internals might make."""
+        def _noop(*args, **kwargs):
+            return None
+        return _noop

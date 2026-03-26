@@ -1,0 +1,32 @@
+- generic [ref=e3]:
+  - complementary [ref=e4]:
+    - generic [ref=e5]:
+      - generic [ref=e6]: B
+      - generic [ref=e7]:
+        - text: BIliBIl
+        - text: Agent
+    - navigation [ref=e8]:
+      - link "⊞ 收藏夹" [ref=e9] [cursor=pointer]:
+        - /url: /
+        - generic [ref=e10]: ⊞
+        - text: 收藏夹
+      - link "◎ 对话" [ref=e11] [cursor=pointer]:
+        - /url: /chat
+        - generic [ref=e12]: ◎
+        - text: 对话
+      - link "⬡ 记忆" [ref=e13] [cursor=pointer]:
+        - /url: /memory
+        - generic [ref=e14]: ⬡
+        - text: 记忆
+    - button "退出登录" [ref=e16] [cursor=pointer]
+  - main [ref=e17]:
+    - generic [ref=e18]:
+      - generic [ref=e19]:
+        - generic [ref=e20]: 对话
+        - generic [ref=e21]:
+          - button "新会话" [ref=e22] [cursor=pointer]
+          - button "记忆管理" [ref=e23] [cursor=pointer]
+      - paragraph [ref=e38]: 你好，介绍一下你自己
+      - generic [ref=e32]:
+        - textbox "输入消息，Enter 发送，Shift+Enter 换行..." [ref=e33]
+        - button [disabled] [ref=e44]
