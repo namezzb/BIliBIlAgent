@@ -25,8 +25,6 @@ SCHEMA_STATEMENTS = [
         session_id TEXT NOT NULL,
         intent TEXT,
         route TEXT,
-        langsmith_thread_id TEXT,
-        langsmith_thread_url TEXT,
         status TEXT NOT NULL,
         requires_confirmation INTEGER NOT NULL DEFAULT 0,
         approval_status TEXT,

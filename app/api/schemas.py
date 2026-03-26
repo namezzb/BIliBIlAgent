@@ -46,8 +46,6 @@ class ChatResponse(BaseModel):
     run_id: str
     intent: str | None = None
     route: str | None = None
-    langsmith_thread_id: str | None = None
-    langsmith_thread_url: str | None = None
     status: str
     reply: str
     requires_confirmation: bool = False
@@ -77,14 +75,6 @@ class RunDetailResponse(ChatResponse):
     event_count: int
     steps: list[RunStepResponse] = Field(default_factory=list)
 
-
-class RunEventResponse(BaseModel):
-    event_id: str
-    run_id: str
-    sequence: int
-    type: str
-    timestamp: str
-    payload: dict[str, object]
 
 
 class SessionMessageResponse(BaseModel):

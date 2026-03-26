@@ -158,3 +158,19 @@
   overflow-y: auto;
 }
 .chat-send-btn { align-self: flex-end; height: 40px; padding: 0 1.4rem; }
+
+/* Streaming token cursor */
+.stream-cursor {
+  display: inline-block;
+  width: 2px;
+  height: 1em;
+  background: var(--accent, #4f8ef7);
+  margin-left: 2px;
+  vertical-align: text-bottom;
+  animation: blink 0.8s step-start infinite;
+}
+@keyframes blink {
+  0%, 100% { opacity: 1; }
+  50%       { opacity: 0; }
+}
+

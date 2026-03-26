@@ -1,8 +1,8 @@
-import { useState, useRef, useEffect } from 'react';
+import { useState, useRef, useEffect, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
-import { sendChat, confirmRun } from '../api/agent';
+import { streamChat, streamConfirm, type StreamChunk } from '../api/agent';
 import './ChatPage.css';
 
 interface Message {
@@ -15,6 +15,8 @@ interface Message {
   executionPlan?: any;
   requiresConfirmation?: boolean;
   approvalStatus?: string;
+  /** true while tokens are still streaming in */
+  streaming?: boolean;
 }
 
 const routeLabel: Record<string, string> = {
@@ -41,6 +43,7 @@ export default function ChatPage() {
   const [loading, setLoading] = useState(false);
   const [confirming, setConfirming] = useState<Record<string, boolean>>({});
   const bottomRef = useRef<HTMLDivElement>(null);
+  const abortRef = useRef<AbortController | null>(null);
 
   const sessionId = useRef<string>(
     localStorage.getItem('sessionId') ?? (() => {
@@ -55,7 +58,46 @@ export default function ChatPage() {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages]);
 
-  const addMsg = (m: Message) => setMessages(prev => [...prev, m]);
+  const addMsg = useCallback((m: Message) => setMessages(prev => [...prev, m]), []);
+
+  /** Append tokens to the last streaming assistant message */
+  const appendToken = useCallback((token: string) => {
+    setMessages(prev => {
+      if (prev.length === 0) return prev;
+      const last = prev[prev.length - 1];
+      if (last.role === 'assistant' && last.streaming) {
+        return [...prev.slice(0, -1), { ...last, content: last.content + token }];
+      }
+      return prev;
+    });
+  }, []);
+
+  /** Finalise the last streaming message with the done payload */
+  const finalizeStreamingMsg = useCallback((done: StreamChunk & { type: 'done' }) => {
+    setMessages(prev => {
+      if (prev.length === 0) return prev;
+      const last = prev[prev.length - 1];
+      if (last.role === 'assistant' && last.streaming) {
+        return [
+          ...prev.slice(0, -1),
+          {
+            ...last,
+            // Only replace content if reply is non-empty (e.g. for confirmation messages)
+            content: done.reply || last.content,
+            route: done.route ?? last.route,
+            runId: last.runId ?? done.run_id,
+            status: done.status,
+            executionPlan: done.execution_plan,
+            requiresConfirmation: done.requires_confirmation,
+            approvalStatus: done.approval_status ?? undefined,
+            streaming: false,
+          },
+        ];
+      }
+      return prev;
+    });
+    sessionId.current = done.run_id ? sessionId.current : sessionId.current;
+  }, []);
 
   const handleSend = async () => {
     const text = input.trim();
@@ -63,57 +105,117 @@ export default function ChatPage() {
     setInput('');
     addMsg({ id: genId(), role: 'user', content: text });
     setLoading(true);
+
+    // Placeholder streaming bubble
+    const bubbleId = genId();
+    addMsg({ id: bubbleId, role: 'assistant', content: '', streaming: true });
+
+    abortRef.current = new AbortController();
+
     try {
-      const res = await sendChat({ session_id: sessionId.current, user_id: userId, message: text });
-      sessionId.current = res.session_id;
-      localStorage.setItem('sessionId', res.session_id);
-      addMsg({
-        id: genId(),
-        role: 'assistant',
-        content: res.reply,
-        route: res.route ?? undefined,
-        runId: res.run_id,
-        status: res.status,
-        executionPlan: res.execution_plan,
-        requiresConfirmation: res.requires_confirmation,
-        approvalStatus: res.approval_status,
-      });
+      const done = await streamChat(
+        { session_id: sessionId.current, user_id: userId, message: text },
+        (chunk) => {
+          if (chunk.type === 'token') {
+            appendToken(chunk.content);
+          } else if (chunk.type === 'interrupt') {
+            // Interrupt payload arrives before done — update bubble with plan info
+            setMessages(prev => {
+              const last = prev[prev.length - 1];
+              if (last.role === 'assistant' && last.streaming) {
+                return [
+                  ...prev.slice(0, -1),
+                  {
+                    ...last,
+                    executionPlan: (chunk.data as any).execution_plan,
+                    requiresConfirmation: true,
+                  },
+                ];
+              }
+              return prev;
+            });
+          }
+        },
+        abortRef.current.signal,
+      );
+
+      // Update session id from X-Run-Id header is already in done.run_id
+      if (done.run_id) {
+        // Store run_id on the bubble so confirm button can use it
+        setMessages(prev => {
+          const last = prev[prev.length - 1];
+          if (last.role === 'assistant' && last.streaming) {
+            return [...prev.slice(0, -1), { ...last, runId: done.run_id }];
+          }
+          return prev;
+        });
+      }
+
+      finalizeStreamingMsg(done);
     } catch (e: any) {
-      addMsg({ id: genId(), role: 'assistant', content: `❌ ${e?.response?.data?.detail ?? '请求失败'}` });
+      if (e?.name === 'AbortError') {
+        setMessages(prev => {
+          const last = prev[prev.length - 1];
+          if (last.role === 'assistant' && last.streaming) {
+            return [...prev.slice(0, -1), { ...last, content: last.content || '（已中断）', streaming: false }];
+          }
+          return prev;
+        });
+      } else {
+        setMessages(prev => {
+          const last = prev[prev.length - 1];
+          if (last.role === 'assistant' && last.streaming) {
+            return [...prev.slice(0, -1), { ...last, content: `❌ ${e?.message ?? '请求失败'}`, streaming: false }];
+          }
+          return prev;
+        });
+      }
     } finally {
       setLoading(false);
+      abortRef.current = null;
     }
   };
 
   const handleConfirm = async (runId: string, approved: boolean) => {
     setConfirming(prev => ({ ...prev, [runId]: true }));
+
+    // Mark the original bubble as no longer requiring confirmation
+    setMessages(prev => prev.map(m =>
+      m.runId === runId ? { ...m, requiresConfirmation: false } : m
+    ));
+
+    // Add a new streaming bubble for the resume response
+    addMsg({ id: genId(), role: 'assistant', content: '', streaming: true });
+
     try {
-      const res = await confirmRun(runId, approved);
-      setMessages(prev => prev.map(m =>
-        m.runId === runId
-          ? { ...m, status: res.status, approvalStatus: res.approval_status, requiresConfirmation: false, content: m.content }
-          : m
-      ));
-      addMsg({
-        id: genId(),
-        role: 'assistant',
-        content: res.reply,
-        route: res.route ?? undefined,
-        runId: res.run_id,
-        status: res.status,
-      });
+      const done = await streamConfirm(
+        runId,
+        approved,
+        (chunk) => {
+          if (chunk.type === 'token') appendToken(chunk.content);
+        },
+      );
+      finalizeStreamingMsg(done);
     } catch (e: any) {
-      addMsg({ id: genId(), role: 'assistant', content: `❌ ${e?.response?.data?.detail ?? '确认失败'}` });
+      setMessages(prev => {
+        const last = prev[prev.length - 1];
+        if (last.role === 'assistant' && last.streaming) {
+          return [...prev.slice(0, -1), { ...last, content: `❌ ${e?.message ?? '确认失败'}`, streaming: false }];
+        }
+        return prev;
+      });
     } finally {
       setConfirming(prev => ({ ...prev, [runId]: false }));
     }
   };
 
   const newSession = () => {
+    abortRef.current?.abort();
     const id = genId();
     sessionId.current = id;
     localStorage.setItem('sessionId', id);
     setMessages([]);
+    setLoading(false);
   };
 
   return (
@@ -148,7 +250,11 @@ export default function ChatPage() {
                 </span>
               )}
               <div className="msg-content">
-                <ReactMarkdown remarkPlugins={[remarkGfm]}>{m.content}</ReactMarkdown>
+                {m.streaming && !m.content
+                  ? <span className="stream-cursor" />
+                  : <ReactMarkdown remarkPlugins={[remarkGfm]}>{m.content}</ReactMarkdown>
+                }
+                {m.streaming && m.content && <span className="stream-cursor" />}
               </div>
 
               {m.requiresConfirmation && m.executionPlan && m.runId && (
@@ -182,7 +288,7 @@ export default function ChatPage() {
           </div>
         ))}
 
-        {loading && (
+        {loading && messages[messages.length - 1]?.streaming === false && (
           <div className="msg-row assistant">
             <div className="msg-bubble typing">
               <span /><span /><span />
@@ -202,7 +308,10 @@ export default function ChatPage() {
           rows={2}
         />
         <button className="btn btn-primary chat-send-btn" onClick={handleSend} disabled={loading || !input.trim()}>
-          {loading ? <div className="spinner" style={{width:16,height:16}} /> : '发送'}
+          {loading
+            ? <button className="btn btn-ghost" style={{padding:'2px 8px', fontSize:12}} onClick={() => abortRef.current?.abort()}>■ 停止</button>
+            : '发送'
+          }
         </button>
       </div>
     </div>

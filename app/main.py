@@ -1,8 +1,10 @@
 from contextlib import asynccontextmanager
+from typing import Any
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from langsmith.middleware import TracingMiddleware
+
+from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 
 from app.agent.tools import (
     build_bilibili_import_tool,
@@ -19,7 +21,6 @@ from app.services.knowledge_index import ChromaVectorIndex, KnowledgeIndexServic
 from app.services.knowledge_qa import KnowledgeGroundedQAService
 from app.services.knowledge_retrieval import KnowledgeRetrievalService
 from app.services.llm import OpenAICompatibleLLM
-from app.services.runtime_audit import LangSmithRuntimeAudit, NoOpRuntimeAudit
 from app.services.session_memory import SessionMemoryManager
 from app.services.user_memory import UserMemoryManager
 
@@ -29,21 +30,7 @@ async def lifespan(app: FastAPI):
     settings: Settings = app.state.settings
     repository = SQLiteRepository(settings.app_db_path)
     repository.initialize()
-    if app.state.runtime_audit:
-        runtime_audit = app.state.runtime_audit
-    elif settings.langsmith_tracing and settings.langsmith_api_key and settings.langsmith_project:
-        runtime_audit = LangSmithRuntimeAudit(
-            enabled=settings.langsmith_tracing,
-            api_key=settings.langsmith_api_key,
-            project_name=settings.langsmith_project,
-            endpoint=settings.langsmith_endpoint,
-            workspace_id=settings.langsmith_workspace_id,
-            web_url=settings.langsmith_web_url,
-            app_name=settings.app_name,
-            environment=settings.environment,
-        )
-    else:
-        runtime_audit = NoOpRuntimeAudit()
+
     llm = OpenAICompatibleLLM(
         api_key=settings.llm_api_key,
         base_url=settings.llm_base_url,
@@ -51,7 +38,6 @@ async def lifespan(app: FastAPI):
         summary_model=settings.summary_model,
         embedding_model=settings.embedding_model,
         system_prompt=settings.llm_system_prompt,
-        runtime_audit=runtime_audit,
     )
     user_memory = UserMemoryManager(repository)
     bilibili_favorites = BilibiliFavoriteFolderService()
@@ -71,49 +57,57 @@ async def lifespan(app: FastAPI):
         repository=repository,
         favorites_service=bilibili_favorites,
         knowledge_index=knowledge_index,
-        runtime_audit=runtime_audit,
     )
     knowledge_retrieval_service = KnowledgeRetrievalService(repository, knowledge_index)
     knowledge_retrieval_tool = build_knowledge_retrieval_tool(knowledge_retrieval_service)
     knowledge_qa = KnowledgeGroundedQAService(llm)
     bilibili_import_tool = build_bilibili_import_tool(bilibili_import_pipeline)
-    orchestrator = AgentOrchestrator(
-        repository=repository,
-        llm=llm,
-        checkpoint_db_path=settings.checkpoint_db_path,
-        user_memory=user_memory,
-        runtime_audit=runtime_audit,
-        tool_registry=build_tool_registry(bilibili_import_tool),
-        knowledge_retrieval_service=knowledge_retrieval_service,
-        knowledge_retrieval_tool=knowledge_retrieval_tool,
-        knowledge_qa=knowledge_qa,
-    )
-    session_memory = SessionMemoryManager(repository, llm)
 
-    app.state.repository = repository
-    app.state.orchestrator = orchestrator
-    app.state.session_memory = session_memory
-    app.state.user_memory = user_memory
-    app.state.bilibili_favorite_folder_service = bilibili_favorites
-    app.state.bilibili_import_pipeline = bilibili_import_pipeline
-    app.state.bilibili_import_tool = bilibili_import_tool
-    app.state.knowledge_index = knowledge_index
-    app.state.knowledge_retrieval = knowledge_retrieval_service
-    app.state.knowledge_retrieval_tool = knowledge_retrieval_tool
-    app.state.knowledge_qa = knowledge_qa
-    app.state.runtime_audit = runtime_audit
+    injected_checkpointer = getattr(app.state, "checkpointer", None)
 
-    try:
-        yield
-    finally:
-        orchestrator.close()
-        runtime_audit.close()
+    async def _run_with_checkpointer(cp):
+        orchestrator = AgentOrchestrator(
+            repository=repository,
+            llm=llm,
+            checkpointer=cp,
+            user_memory=user_memory,
+            tool_registry=build_tool_registry(bilibili_import_tool),
+            knowledge_retrieval_service=knowledge_retrieval_service,
+            knowledge_retrieval_tool=knowledge_retrieval_tool,
+            knowledge_qa=knowledge_qa,
+        )
+        session_memory = SessionMemoryManager(repository, llm)
+
+        app.state.repository = repository
+        app.state.orchestrator = orchestrator
+        app.state.session_memory = session_memory
+        app.state.user_memory = user_memory
+        app.state.bilibili_favorite_folder_service = bilibili_favorites
+        app.state.bilibili_import_pipeline = bilibili_import_pipeline
+        app.state.bilibili_import_tool = bilibili_import_tool
+        app.state.knowledge_index = knowledge_index
+        app.state.knowledge_retrieval = knowledge_retrieval_service
+        app.state.knowledge_retrieval_tool = knowledge_retrieval_tool
+        app.state.knowledge_qa = knowledge_qa
+
+        try:
+            yield
+        finally:
+            orchestrator.close()
+
+    if injected_checkpointer is not None:
+        async for _ in _run_with_checkpointer(injected_checkpointer):
+            yield
+    else:
+        async with AsyncSqliteSaver.from_conn_string(str(settings.checkpoint_db_path)) as cp:
+            async for _ in _run_with_checkpointer(cp):
+                yield
 
 
 def create_app(
     settings: Settings | None = None,
     *,
-    runtime_audit: LangSmithRuntimeAudit | None = None,
+    checkpointer: Any | None = None,
 ) -> FastAPI:
     app_settings = settings or get_settings()
     app_settings.ensure_directories()
@@ -125,7 +119,7 @@ def create_app(
         lifespan=lifespan,
     )
     app.state.settings = app_settings
-    app.state.runtime_audit = runtime_audit
+    app.state.checkpointer = checkpointer
     app.add_middleware(
         CORSMiddleware,
         allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
@@ -133,7 +127,6 @@ def create_app(
         allow_methods=["*"],
         allow_headers=["*"],
     )
-    app.add_middleware(TracingMiddleware)
     app.include_router(chat_router)
 
     @app.get("/")

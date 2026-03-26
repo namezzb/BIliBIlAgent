@@ -5,7 +5,7 @@ from typing import Any
 from app.db.repository import SQLiteRepository
 from app.services.bilibili_favorites import BilibiliFavoriteFolderService
 from app.services.knowledge_index import DuplicateKnowledgeVideoError, KnowledgeIndexService
-from app.services.runtime_audit import LangSmithRuntimeAudit
+from app.services.runtime_audit import LangSmithRuntimeAudit, NoOpRuntimeAudit
 
 
 class BilibiliImportPipeline:
@@ -15,12 +15,12 @@ class BilibiliImportPipeline:
         repository: SQLiteRepository,
         favorites_service: BilibiliFavoriteFolderService,
         knowledge_index: KnowledgeIndexService,
-        runtime_audit: LangSmithRuntimeAudit,
+        runtime_audit: LangSmithRuntimeAudit | None = None,
     ) -> None:
         self.repository = repository
         self.favorites_service = favorites_service
         self.knowledge_index = knowledge_index
-        self.runtime_audit = runtime_audit
+        self.runtime_audit = runtime_audit or NoOpRuntimeAudit()
 
     def build_execution_plan(
         self,
@@ -130,7 +130,6 @@ class BilibiliImportPipeline:
         selected_video_ids: list[str],
     ) -> str:
         existing_run = self.repository.get_run(run_id)
-        existing_url = existing_run["langsmith_thread_url"] if existing_run else None
 
         with self.runtime_audit.trace_request(
             name="agent.import_selected_videos",
@@ -152,15 +151,8 @@ class BilibiliImportPipeline:
             tags=["agent", "import", self.runtime_audit.environment],
         ) as trace_run:
             try:
-                reference = self.runtime_audit.build_reference(
-                    run_id=run_id,
-                    trace_run=trace_run,
-                    existing_url=existing_url,
-                )
                 self.repository.update_run(
                     run_id,
-                    langsmith_thread_id=reference["langsmith_thread_id"],
-                    langsmith_thread_url=reference["langsmith_thread_url"],
                     intent="tool_request",
                     route="import_request",
                     status="running",

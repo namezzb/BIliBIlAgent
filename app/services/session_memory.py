@@ -119,12 +119,16 @@ class SessionMemoryManager:
         if not older_messages:
             return None
 
-        model_summary = self.llm.summarize_conversation(
-            [
-                {"role": message["role"], "content": message["content"]}
-                for message in older_messages
-            ]
-        )
+        model_summary = None
+        try:
+            model_summary = self.llm.summarize_conversation(
+                [
+                    {"role": message["role"], "content": message["content"]}
+                    for message in older_messages
+                ]
+            )
+        except Exception:
+            pass
         if model_summary:
             return model_summary
 

@@ -1,4 +1,5 @@
 import asyncio
+import json
 from typing import Literal
 from uuid import uuid4
 
@@ -17,7 +18,6 @@ from app.api.schemas import (
     KnowledgeDebugIndexResponse,
     KnowledgeSearchRequest,
     KnowledgeSearchResponse,
-    RunEventResponse,
     RunConfirmationRequest,
     RunDetailResponse,
     SessionDetailResponse,
@@ -33,7 +33,6 @@ from app.services.knowledge_index import DuplicateKnowledgeVideoError
 
 
 router = APIRouter(prefix="/api", tags=["agent"])
-TERMINAL_STATUSES = {"completed", "cancelled", "failed"}
 
 
 def _persist_run_result(
@@ -45,8 +44,6 @@ def _persist_run_result(
         run_id,
         intent=result["intent"],
         route=result["route"],
-        langsmith_thread_id=result.get("langsmith_thread_id"),
-        langsmith_thread_url=result.get("langsmith_thread_url"),
         status=result["status"],
         requires_confirmation=result["requires_confirmation"],
         approval_status=result["approval_status"],
@@ -139,111 +136,6 @@ def _execute_bilibili_import_in_background(
         return None
 
 
-@router.post("/chat", response_model=ChatResponse)
-def chat(request: Request, payload: ChatRequest) -> ChatResponse:
-    repository = request.app.state.repository
-    orchestrator = request.app.state.orchestrator
-    session_memory = request.app.state.session_memory
-
-    session_id, user_id = _prepare_session(
-        repository,
-        session_id=payload.session_id,
-        user_id=payload.user_id,
-    )
-
-    run_id = str(uuid4())
-    repository.create_run(run_id, session_id, status="running")
-    repository.add_message(session_id, "user", payload.message, run_id=run_id)
-    session_context = session_memory.load_session_context(session_id)
-    user_memory_context = None
-    if user_id:
-        user_memory_context = request.app.state.user_memory.build_context_message(user_id)
-
-    try:
-        result = orchestrator.invoke_chat(
-            session_id=session_id,
-            run_id=run_id,
-            message=payload.message,
-            messages=session_context["messages"],
-            user_id=user_id,
-            session_summary=session_context["session_summary"],
-            recent_context=session_context["recent_context"],
-            user_memory_context=user_memory_context,
-        )
-    except Exception as exc:
-        detail = f"Agent run failed: {exc}"
-        _record_run_failure(repository, run_id, detail)
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=detail,
-        ) from exc
-
-    _persist_run_result(repository, run_id, result)
-    repository.add_message(session_id, "assistant", result["reply"], run_id=run_id)
-    session_memory.refresh_session_memory(
-        session_id,
-        run_id=run_id,
-        intent=result["intent"],
-        route=result["route"],
-        status=result["status"],
-        reply=result["reply"],
-        pending_actions=result["pending_actions"],
-        retrieval_result=result.get("retrieval_result"),
-    )
-    return ChatResponse(**result)
-
-
-@router.post("/runs/{run_id}/confirm", response_model=ChatResponse)
-def confirm_run(
-    run_id: str,
-    payload: RunConfirmationRequest,
-    request: Request,
-) -> ChatResponse:
-    repository = request.app.state.repository
-    orchestrator = request.app.state.orchestrator
-    session_memory = request.app.state.session_memory
-
-    existing_run = repository.get_run(run_id)
-    if existing_run is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Run not found.")
-    if existing_run["status"] != "awaiting_confirmation":
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail="Run is not waiting for confirmation."
-        )
-
-    try:
-        result = orchestrator.resume_run(run_id, payload.approved)
-    except Exception as exc:
-        detail = f"Agent run failed during confirmation: {exc}"
-        _record_run_failure(repository, run_id, detail)
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=detail,
-        ) from exc
-    if existing_run.get("langsmith_thread_url") and not result.get("langsmith_thread_url"):
-        result["langsmith_thread_url"] = existing_run["langsmith_thread_url"]
-    elif existing_run.get("langsmith_thread_url"):
-        result["langsmith_thread_url"] = existing_run["langsmith_thread_url"]
-    if existing_run.get("langsmith_thread_id") and not result.get("langsmith_thread_id"):
-        result["langsmith_thread_id"] = existing_run["langsmith_thread_id"]
-    elif existing_run.get("langsmith_thread_id"):
-        result["langsmith_thread_id"] = existing_run["langsmith_thread_id"]
-    _persist_run_result(repository, run_id, result)
-    repository.add_message(existing_run["session_id"], "assistant", result["reply"], run_id=run_id)
-    session_memory.refresh_session_memory(
-        existing_run["session_id"],
-        run_id=run_id,
-        intent=result["intent"],
-        route=result["route"],
-        status=result["status"],
-        reply=result["reply"],
-        pending_actions=result["pending_actions"],
-        retrieval_result=result.get("retrieval_result"),
-    )
-    return ChatResponse(**result)
-
-
 @router.get("/runs/{run_id}", response_model=RunDetailResponse)
 def get_run(run_id: str, request: Request) -> RunDetailResponse:
     repository = request.app.state.repository
@@ -256,8 +148,6 @@ def get_run(run_id: str, request: Request) -> RunDetailResponse:
         run_id=existing_run["run_id"],
         intent=existing_run["intent"],
         route=existing_run["route"],
-        langsmith_thread_id=existing_run["langsmith_thread_id"],
-        langsmith_thread_url=existing_run["langsmith_thread_url"],
         status=existing_run["status"],
         reply=existing_run["latest_reply"] or "",
         requires_confirmation=existing_run["requires_confirmation"],
@@ -412,7 +302,6 @@ def submit_bilibili_import(
     background_tasks: BackgroundTasks,
 ) -> ChatResponse:
     repository = request.app.state.repository
-    runtime_audit = request.app.state.runtime_audit
     import_pipeline = request.app.state.bilibili_import_pipeline
     cookie = _require_bilibili_cookie(request)
     session_id, user_id = _prepare_session(
@@ -450,68 +339,36 @@ def submit_bilibili_import(
     )
 
     repository.create_run(run_id, session_id, status="running")
-    with runtime_audit.trace_request(
-        name="agent.submit_bilibili_import",
-        inputs={
-            "session_id": session_id,
-            "run_id": run_id,
-            "favorite_folder_id": payload.favorite_folder_id,
-            "selected_video_ids": list(validated["selected_video_ids"]),
-        },
-        metadata={
-            "thread_id": run_id,
-            "run_id": run_id,
+    repository.update_run(
+        run_id,
+        intent="tool_request",
+        route="import_request",
+        status="running",
+        requires_confirmation=False,
+        approval_status="approved",
+        latest_reply=reply,
+        pending_actions=[],
+        execution_plan=execution_plan,
+    )
+    repository.upsert_run_step(
+        run_id,
+        "import_submitted",
+        "import_submitted",
+        "completed",
+        input_summary=f"favorite_folder_id={payload.favorite_folder_id}",
+        output_summary=f"accepted {len(validated['selected_video_ids'])} selected video(s)",
+    )
+    repository.append_run_event(
+        run_id,
+        "run_started",
+        {
             "session_id": session_id,
             "user_id": user_id,
-            "environment": runtime_audit.environment,
-            "app_name": runtime_audit.app_name,
-            "operation": "submit_bilibili_import",
+            "favorite_folder_id": payload.favorite_folder_id,
+            "selected_video_ids": list(validated["selected_video_ids"]),
+            "route": "import_request",
         },
-        tags=["agent", "import", runtime_audit.environment],
-    ) as trace_run:
-        reference = runtime_audit.build_reference(run_id=run_id, trace_run=trace_run)
-        repository.update_run(
-            run_id,
-            intent="tool_request",
-            route="import_request",
-            langsmith_thread_id=reference["langsmith_thread_id"],
-            langsmith_thread_url=reference["langsmith_thread_url"],
-            status="running",
-            requires_confirmation=False,
-            approval_status="approved",
-            latest_reply=reply,
-            pending_actions=[],
-            execution_plan=execution_plan,
-        )
-        repository.upsert_run_step(
-            run_id,
-            "import_submitted",
-            "import_submitted",
-            "completed",
-            input_summary=f"favorite_folder_id={payload.favorite_folder_id}",
-            output_summary=f"accepted {len(validated['selected_video_ids'])} selected video(s)",
-        )
-        repository.append_run_event(
-            run_id,
-            "run_started",
-            {
-                "session_id": session_id,
-                "user_id": user_id,
-                "favorite_folder_id": payload.favorite_folder_id,
-                "selected_video_ids": list(validated["selected_video_ids"]),
-                "route": "import_request",
-            },
-        )
-        trace_run.end(
-            outputs=runtime_audit.sanitize_payload(
-                {
-                    "run_id": run_id,
-                    "status": "running",
-                    "reply": reply,
-                    "execution_plan": execution_plan,
-                }
-            )
-        )
+    )
 
     background_tasks.add_task(
         _execute_bilibili_import_in_background,
@@ -528,8 +385,6 @@ def submit_bilibili_import(
         run_id=run_id,
         intent="tool_request",
         route="import_request",
-        langsmith_thread_id=run_id,
-        langsmith_thread_url=reference["langsmith_thread_url"],
         status="running",
         reply=reply,
         requires_confirmation=False,
@@ -574,50 +429,172 @@ def search_knowledge(
     return KnowledgeSearchResponse(**result)
 
 
-@router.get("/runs/{run_id}/events")
-async def stream_run_events(
-    run_id: str,
-    request: Request,
-    follow: bool = Query(default=True),
-) -> StreamingResponse:
+@router.post("/chat/stream")
+async def chat_stream(request: Request, payload: ChatRequest) -> StreamingResponse:
+    """SSE endpoint: streams LLM tokens + node updates from graph.astream().
+
+    Event format (each line is: data: <json>\n\n):
+      {"type": "token",     "content": str}
+      {"type": "node",      "node": str, "data": dict}
+      {"type": "interrupt", "data": dict}    <- approval required
+      {"type": "done",      "run_id": str, "status": str, "reply": str, ...}
+      "[DONE]"
+    """
     repository = request.app.state.repository
-    existing_run = repository.get_run(run_id)
-    if existing_run is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Run not found.")
+    orchestrator = request.app.state.orchestrator
+    session_memory = request.app.state.session_memory
 
-    async def event_stream():
-        last_sequence = 0
-        idle_loops = 0
-        first_pass_completed = False
+    session_id, user_id = _prepare_session(
+        repository,
+        session_id=payload.session_id,
+        user_id=payload.user_id,
+    )
+    run_id = str(uuid4())
+    repository.create_run(run_id, session_id, status="running")
+    repository.add_message(session_id, "user", payload.message, run_id=run_id)
+    session_context = session_memory.load_session_context(session_id)
+    user_memory_context = None
+    if user_id:
+        user_memory_context = request.app.state.user_memory.build_context_message(user_id)
 
-        while True:
-            if await request.is_disconnected():
-                break
+    async def event_generator():
+        done_payload: dict = {}
+        try:
+            async for chunk in orchestrator.astream_chat(
+                session_id=session_id,
+                run_id=run_id,
+                message=payload.message,
+                messages=session_context["messages"],
+                user_id=user_id,
+                session_summary=session_context["session_summary"],
+                recent_context=session_context["recent_context"],
+                user_memory_context=user_memory_context,
+            ):
+                if chunk.get("type") == "done":
+                    done_payload = chunk
+                yield f"data: {json.dumps(chunk, ensure_ascii=False)}\n\n"
+        except Exception as exc:
+            detail = f"Agent stream failed: {exc}"
+            _record_run_failure(repository, run_id, detail)
+            yield f"data: {json.dumps({'type': 'error', 'detail': detail})}\n\n"
+            yield "data: [DONE]\n\n"
+            return
 
-            events = repository.get_run_events(run_id, after_sequence=last_sequence)
-            for event in events:
-                last_sequence = event["sequence"]
-                payload = RunEventResponse(**event).model_dump_json()
-                yield f"id: {event['sequence']}\nevent: run_event\ndata: {payload}\n\n"
-                idle_loops = 0
+        yield "data: [DONE]\n\n"
 
-            current_run = repository.get_run(run_id)
-            if current_run is None:
-                break
-            if current_run["status"] in TERMINAL_STATUSES:
-                break
-            if not follow and first_pass_completed:
-                break
-
-            first_pass_completed = True
-            idle_loops += 1
-            if idle_loops >= 20:
-                yield ": keep-alive\n\n"
-                idle_loops = 0
-            await asyncio.sleep(0.25)
+        # Persist run result and update session memory after stream completes
+        if done_payload:
+            result = {
+                "session_id": session_id,
+                "run_id": run_id,
+                "intent": done_payload.get("intent"),
+                "route": done_payload.get("route"),
+                "status": done_payload.get("status", "completed"),
+                "reply": done_payload.get("reply", ""),
+                "requires_confirmation": done_payload.get("requires_confirmation", False),
+                "approval_status": done_payload.get("approval_status"),
+                "execution_plan": done_payload.get("execution_plan"),
+                "pending_actions": done_payload.get("pending_actions", []),
+                "approval_requested_at": None,
+                "approval_resolved_at": None,
+            }
+            _persist_run_result(repository, run_id, result)
+            if not result["requires_confirmation"]:
+                repository.add_message(session_id, "assistant", result["reply"], run_id=run_id)
+            session_memory.refresh_session_memory(
+                session_id,
+                run_id=run_id,
+                intent=result["intent"],
+                route=result["route"],
+                status=result["status"],
+                reply=result["reply"],
+                pending_actions=result["pending_actions"],
+                retrieval_result=None,
+            )
 
     return StreamingResponse(
-        event_stream(),
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Run-Id": run_id,
+            "Access-Control-Expose-Headers": "X-Run-Id",
+        },
+    )
+
+
+@router.post("/runs/{run_id}/confirm/stream")
+async def confirm_run_stream(
+    run_id: str,
+    payload: RunConfirmationRequest,
+    request: Request,
+) -> StreamingResponse:
+    """SSE endpoint: resume an interrupted run and stream the continuation.
+
+    Same event format as /chat/stream.
+    """
+    repository = request.app.state.repository
+    orchestrator = request.app.state.orchestrator
+    session_memory = request.app.state.session_memory
+
+    existing_run = repository.get_run(run_id)
+    if existing_run is None:
+        raise HTTPException(status_code=404, detail="Run not found.")
+    if existing_run["status"] != "awaiting_confirmation":
+        raise HTTPException(status_code=409, detail="Run is not waiting for confirmation.")
+
+    session_id = existing_run["session_id"]
+
+    async def event_generator():
+        done_payload: dict = {}
+        try:
+            async for chunk in orchestrator.astream_resume(
+                run_id,
+                payload.approved,
+            ):
+                if chunk.get("type") == "done":
+                    done_payload = chunk
+                yield f"data: {json.dumps(chunk, ensure_ascii=False)}\n\n"
+        except Exception as exc:
+            detail = f"Agent confirm stream failed: {exc}"
+            _record_run_failure(repository, run_id, detail)
+            yield f"data: {json.dumps({'type': 'error', 'detail': detail})}\n\n"
+            yield "data: [DONE]\n\n"
+            return
+
+        yield "data: [DONE]\n\n"
+
+        if done_payload:
+            result = {
+                "session_id": session_id,
+                "run_id": run_id,
+                "intent": done_payload.get("intent"),
+                "route": done_payload.get("route"),
+                "status": done_payload.get("status", "completed"),
+                "reply": done_payload.get("reply", ""),
+                "requires_confirmation": False,
+                "approval_status": done_payload.get("approval_status"),
+                "execution_plan": done_payload.get("execution_plan"),
+                "pending_actions": done_payload.get("pending_actions", []),
+                "approval_requested_at": None,
+                "approval_resolved_at": None,
+            }
+            _persist_run_result(repository, run_id, result)
+            repository.add_message(session_id, "assistant", result["reply"], run_id=run_id)
+            session_memory.refresh_session_memory(
+                session_id,
+                run_id=run_id,
+                intent=result["intent"],
+                route=result["route"],
+                status=result["status"],
+                reply=result["reply"],
+                pending_actions=result["pending_actions"],
+                retrieval_result=None,
+            )
+
+    return StreamingResponse(
+        event_generator(),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",
