@@ -4,22 +4,20 @@ from langchain_openai import ChatOpenAI
 from langchain_core.messages import SystemMessage, HumanMessage, AIMessage
 
 
-def _to_lc_messages(messages: list[dict[str, str]], system_prompt: str, extra_system: list[str]) -> list:
-    """Convert plain dicts to LangChain message objects."""
-    result = [SystemMessage(content=system_prompt)]
-    for content in extra_system:
-        if content.strip():
-            result.append(SystemMessage(content=content))
-    for m in messages:
-        role = m.get("role", "user")
-        content = m.get("content", "")
-        if role == "user":
-            result.append(HumanMessage(content=content))
-        elif role == "assistant":
-            result.append(AIMessage(content=content))
-        else:
-            result.append(SystemMessage(content=content))
-    return result
+def _embed_via_dashscope(api_key: str, model: str, texts: list[str]) -> list[list[float]]:
+    """Call DashScope TextEmbedding API for document indexing."""
+    import dashscope
+    from dashscope import TextEmbedding
+    dashscope.api_key = api_key
+    response = TextEmbedding.call(
+        model=model,
+        input=texts,
+        text_type="document",
+    )
+    if response.status_code != 200:
+        raise RuntimeError(f"DashScope embedding failed: {response.code} {response.message}")
+    items = sorted(response.output["embeddings"], key=lambda e: e["text_index"])
+    return [list(item["embedding"]) for item in items]
 
 
 class OpenAICompatibleLLM:
@@ -32,6 +30,8 @@ class OpenAICompatibleLLM:
         summary_model: str | None,
         embedding_model: str,
         system_prompt: str,
+        embedding_api_key: str | None = None,
+        embedding_base_url: str | None = None,
     ) -> None:
         self.api_key = api_key
         self.base_url = base_url
@@ -39,7 +39,10 @@ class OpenAICompatibleLLM:
         self.summary_model = summary_model or model
         self.embedding_model = embedding_model
         self.system_prompt = system_prompt
+        self.embedding_api_key = embedding_api_key or api_key
+        self.embedding_base_url = embedding_base_url
         self._client: OpenAI | None = None
+        self._embed_client: OpenAI | None = None
         self._lc_chat: ChatOpenAI | None = None
 
     def _get_client(self) -> OpenAI:
@@ -59,7 +62,19 @@ class OpenAICompatibleLLM:
         return self.get_lc_chat_model()
 
     def _build_lc_messages(self, messages: list[dict[str, str]], *, extra_system_messages: list[str] | None = None) -> list:
-        return _to_lc_messages(messages, self.system_prompt, extra_system_messages or [])
+        lc: list = [SystemMessage(content=self.system_prompt)]
+        for content in (extra_system_messages or []):
+            if content.strip():
+                lc.append(SystemMessage(content=content))
+        for m in messages:
+            role = m.get("role", "user")
+            if role == "user":
+                lc.append(HumanMessage(content=m.get("content", "")))
+            elif role == "assistant":
+                lc.append(AIMessage(content=m.get("content", "")))
+            else:
+                lc.append(SystemMessage(content=m.get("content", "")))
+        return lc
 
     def get_lc_chat_model(self) -> ChatOpenAI:
         """Return a LangChain ChatOpenAI instance for use inside LangGraph nodes.
@@ -122,8 +137,8 @@ class OpenAICompatibleLLM:
         """Chat using the LangChain ChatOpenAI model (supports streaming via LangGraph)."""
         if not self.api_key:
             return self._fallback_chat(messages)
-        lc_messages = _to_lc_messages(
-            messages, self.system_prompt, extra_system_messages or []
+        lc_messages = self._build_lc_messages(
+            messages, extra_system_messages=extra_system_messages
         )
         try:
             result = self.get_lc_chat_model().invoke(lc_messages)
@@ -167,15 +182,41 @@ class OpenAICompatibleLLM:
 
         return None
 
+    def _get_embed_client(self) -> OpenAI:
+        if self._embed_client is None:
+            client_kwargs: dict = {
+                "http_client": httpx.Client(proxy=None, trust_env=False),
+            }
+            # Use dedicated embedding key/url if provided, else fall back to main LLM config
+            api_key = self.embedding_api_key or self.api_key
+            base_url = self.embedding_base_url or self.base_url
+            if api_key:
+                client_kwargs["api_key"] = api_key
+            if base_url:
+                client_kwargs["base_url"] = base_url
+            self._embed_client = OpenAI(**client_kwargs)
+        return self._embed_client
+
     def embed_texts(self, texts: list[str]) -> list[list[float]]:
         if not texts:
             return []
-        if not self.api_key:
-            raise RuntimeError("LLM_API_KEY or OPENROUTER_API_KEY is required for embeddings.")
+        api_key = self.embedding_api_key or self.api_key
+        if not api_key:
+            raise RuntimeError("EMBEDDING_API_KEY or OPENROUTER_API_KEY is required for embeddings.")
 
-        response = self._get_client().embeddings.create(
+        # DashScope models (e.g. text-embedding-v3) don't use OpenAI-compatible endpoint
+        _DASHSCOPE_MODELS = {"text-embedding-v1", "text-embedding-v2", "text-embedding-v3"}
+        if self.embedding_model in _DASHSCOPE_MODELS:
+            return _embed_via_dashscope(api_key, self.embedding_model, texts)
+
+        response = self._get_embed_client().embeddings.create(
             model=self.embedding_model,
             input=texts,
+            encoding_format="float",
+            extra_headers={
+                "HTTP-Referer": "https://github.com/BIliBIlAgent",
+                "X-Title": "BIliBIlAgent",
+            },
         )
         return [list(item.embedding) for item in response.data]
 
@@ -213,25 +254,4 @@ class OpenAICompatibleLLM:
             "Set LLM_API_KEY to enable model responses."
         )
 
-    def _build_lc_messages(
-        self,
-        messages: list[dict[str, str]],
-        *,
-        extra_system_messages: list[str] | None = None,
-    ):
-        """Convert dict messages to LangChain message objects."""
-        from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
-        lc: list = [SystemMessage(content=self.system_prompt)]
-        if extra_system_messages:
-            for content in extra_system_messages:
-                if content.strip():
-                    lc.append(SystemMessage(content=content))
-        for m in messages:
-            role = m.get("role", "user")
-            if role == "user":
-                lc.append(HumanMessage(content=m["content"]))
-            elif role == "assistant":
-                lc.append(AIMessage(content=m["content"]))
-            else:
-                lc.append(SystemMessage(content=m["content"]))
-        return lc
+

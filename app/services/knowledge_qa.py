@@ -27,7 +27,7 @@ class KnowledgeGroundedQAService:
                         "用户问题:\n{question}\n\n"
                         "检索上下文:\n{context}\n\n"
                         "请直接回答，并在最后追加一行来源，至少包含视频标题；"
-                        "如果命中了具体分页，请写出 P{page_number}。"
+                        "如果命中了具体分页，请写出 P{{page_number}}。"
                     ),
                 ),
             ]

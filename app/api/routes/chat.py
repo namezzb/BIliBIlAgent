@@ -449,6 +449,15 @@ async def chat_stream(request: Request, payload: ChatRequest) -> StreamingRespon
                 recent_context=session_context["recent_context"],
                 user_memory_context=user_memory_context,
             ):
+                if chunk.get("type") == "interrupt":
+                    # Immediately persist awaiting_confirmation so that a fast
+                    # confirm request does not race against the stream end and
+                    # receive a 409 "Run is not waiting for confirmation".
+                    repository.update_run(
+                        run_id,
+                        status="awaiting_confirmation",
+                        requires_confirmation=True,
+                    )
                 if chunk.get("type") == "done":
                     done_payload = chunk
                 yield f"data: {json.dumps(chunk, ensure_ascii=False)}\n\n"

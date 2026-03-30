@@ -274,6 +274,7 @@ class KnowledgeIndexService:
             raise RuntimeError(f"Embedding generation failed: {exc}") from exc
 
         candidate_count = max(top_k * 5, 20)
+        #向量搜索
         raw = self.vector_index.query(query_embedding=query_embedding, n_results=candidate_count)
         ids = raw.get("ids", [[]])
         distances = raw.get("distances", [[]])

@@ -5,6 +5,12 @@ import remarkGfm from 'remark-gfm';
 import { streamChat, streamConfirm, type StreamChunk } from '../api/agent';
 import './ChatPage.css';
 
+interface AgentStep {
+  node: string;
+  status: 'running' | 'done';
+  data?: Record<string, unknown>;
+}
+
 interface Message {
   id: string;
   role: 'user' | 'assistant';
@@ -17,6 +23,8 @@ interface Message {
   approvalStatus?: string;
   /** true while tokens are still streaming in */
   streaming?: boolean;
+  /** agent node steps for status display */
+  agentSteps?: AgentStep[];
 }
 
 const routeLabel: Record<string, string> = {
@@ -35,6 +43,46 @@ const routeTagClass: Record<string, string> = {
 };
 
 function genId() { return Math.random().toString(36).slice(2); }
+
+const nodeLabel: Record<string, string> = {
+  load_context: '加载上下文',
+  router: '路由分析',
+  general_chat: '通用对话',
+  retrieve_knowledge: '知识检索',
+  knowledge_qa: '知识问答',
+  plan_and_solve: '制定计划',
+  finalize_run: '完成',
+};
+
+const nodeIcon: Record<string, string> = {
+  load_context: '⟳',
+  router: '⊞',
+  general_chat: '◎',
+  retrieve_knowledge: '⬡',
+  knowledge_qa: '◎',
+  plan_and_solve: '⊙',
+  finalize_run: '✓',
+};
+
+function AgentStatusBar({ steps, streaming }: { steps: AgentStep[]; streaming?: boolean }) {
+  if (steps.length === 0 && !streaming) return null;
+  return (
+    <div className="agent-status-bar">
+      {steps.map((step) => (
+        <span key={step.node} className="agent-step done">
+          <span className="agent-step-icon">{nodeIcon[step.node] ?? '●'}</span>
+          <span className="agent-step-label">{nodeLabel[step.node] ?? step.node}</span>
+        </span>
+      ))}
+      {streaming && (
+        <span className="agent-step running">
+          <span className="agent-step-spinner" />
+          <span className="agent-step-label">思考中…</span>
+        </span>
+      )}
+    </div>
+  );
+}
 
 export default function ChatPage() {
   const navigate = useNavigate();
@@ -67,6 +115,24 @@ export default function ChatPage() {
       const last = prev[prev.length - 1];
       if (last.role === 'assistant' && last.streaming) {
         return [...prev.slice(0, -1), { ...last, content: last.content + token }];
+      }
+      return prev;
+    });
+  }, []);
+
+  /** Update agent step status on the last streaming assistant message */
+  const updateAgentStep = useCallback((node: string, data: Record<string, unknown>) => {
+    setMessages(prev => {
+      if (prev.length === 0) return prev;
+      const last = prev[prev.length - 1];
+      if (last.role === 'assistant' && last.streaming) {
+        const existingSteps = last.agentSteps ?? [];
+        const existingIdx = existingSteps.findIndex(s => s.node === node);
+        const newStep: AgentStep = { node, status: 'done', data };
+        const newSteps = existingIdx >= 0
+          ? existingSteps.map((s, i) => i === existingIdx ? newStep : s)
+          : [...existingSteps, newStep];
+        return [...prev.slice(0, -1), { ...last, agentSteps: newSteps }];
       }
       return prev;
     });
@@ -118,6 +184,8 @@ export default function ChatPage() {
         (chunk) => {
           if (chunk.type === 'token') {
             appendToken(chunk.content);
+          } else if (chunk.type === 'node') {
+            updateAgentStep(chunk.node, chunk.data);
           } else if (chunk.type === 'interrupt') {
             // Interrupt payload arrives before done — update bubble with plan info
             setMessages(prev => {
@@ -193,6 +261,7 @@ export default function ChatPage() {
         approved,
         (chunk) => {
           if (chunk.type === 'token') appendToken(chunk.content);
+          else if (chunk.type === 'node') updateAgentStep(chunk.node, chunk.data);
         },
       );
       finalizeStreamingMsg(done);
@@ -248,6 +317,9 @@ export default function ChatPage() {
                 <span className={`tag ${routeTagClass[m.route] ?? 'tag-gray'} msg-route-tag`}>
                   {routeLabel[m.route] ?? m.route}
                 </span>
+              )}
+              {m.role === 'assistant' && (
+                <AgentStatusBar steps={m.agentSteps ?? []} streaming={m.streaming && !m.content} />
               )}
               <div className="msg-content">
                 {m.streaming && !m.content

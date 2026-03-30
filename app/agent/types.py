@@ -1,16 +1,45 @@
 from typing import Any, Literal, TypedDict
 
+from pydantic import BaseModel, Field
 
-IntentType = Literal["general_chat", "knowledge_query", "tool_request"]
 
-#Routing
+# Three top-level routes that drive the graph branching.
 RouteType = Literal[
+    "general_chat",
+    "knowledge_query",
+    "plan_and_solve",
+]
+
+# Fine-grained hint used only inside retrieve_knowledge for scope resolution.
+# Kept separate so the graph branches stay clean (3-way only).
+RetrievalScopeHint = Literal[
+    "favorite_knowledge_query",
+    "video_knowledge_query",
+    "general_knowledge_query",
+]
+
+# Internal LLM router output — five categories so scope resolution stays precise.
+_LLMRouteType = Literal[
     "general_chat",
     "favorite_knowledge_query",
     "video_knowledge_query",
     "import_request",
     "retry_request",
 ]
+
+
+class RouteDecision(BaseModel):
+    """Structured output schema for LLM-based intent routing."""
+
+    route: _LLMRouteType = Field(
+        description=(
+            "The route that best matches the user's message. "
+            "Use 'general_chat' when none of the specific routes apply."
+        )
+    )
+    reason: str = Field(
+        description="One-sentence explanation of why this route was chosen (for debugging)."
+    )
 
 
 RunStatus = Literal["running", "completed", "awaiting_confirmation", "cancelled", "failed"]
@@ -58,8 +87,10 @@ class AgentState(TypedDict, total=False):
     session_summary: str | None
     recent_context: dict[str, object]
     user_memory_context: str | None
-    intent: IntentType
+    # Top-level route driving graph branching (3 values)
     route: RouteType
+    # Fine-grained hint passed to retrieve_knowledge for scope resolution
+    retrieval_scope_hint: RetrievalScopeHint | None
     status: RunStatus
     requires_confirmation: bool
     approval_status: Literal["approved", "rejected"] | None
@@ -67,6 +98,3 @@ class AgentState(TypedDict, total=False):
     execution_plan: ExecutionPlan | None
     retrieval_result: dict[str, Any] | None
     response: str
-
-
-

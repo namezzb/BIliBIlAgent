@@ -278,30 +278,30 @@ class BilibiliImportPipeline:
                         )
                         stats["indexed"] += 1
 
-                final_reply = self._build_completion_reply(stats)
-                execution_plan = self._mark_execution_plan_status(
-                    self.build_execution_plan(
-                        favorite_folder_id=favorite_folder_id,
-                        selected_video_ids=selected_video_ids,
-                    ),
-                    "completed",
-                )
-                self.repository.update_run(
-                    run_id,
-                    status="completed",
-                    latest_reply=final_reply,
-                    execution_plan=execution_plan,
-                    approval_status="approved",
-                )
-                self.repository.upsert_run_step(
-                    run_id,
-                    "execute_import",
-                    "bilibili_import.execute_import",
-                    "completed",
-                    input_summary=f"favorite_folder_id={favorite_folder_id}",
-                    output_summary=final_reply,
-                )
-                return final_reply
+            final_reply = self._build_completion_reply(stats)
+            execution_plan = self._mark_execution_plan_status(
+                self.build_execution_plan(
+                    favorite_folder_id=favorite_folder_id,
+                    selected_video_ids=selected_video_ids,
+                ),
+                "completed",
+            )
+            self.repository.update_run(
+                run_id,
+                status="completed",
+                latest_reply=final_reply,
+                execution_plan=execution_plan,
+                approval_status="approved",
+            )
+            self.repository.upsert_run_step(
+                run_id,
+                "execute_import",
+                "bilibili_import.execute_import",
+                "completed",
+                input_summary=f"favorite_folder_id={favorite_folder_id}",
+                output_summary=final_reply,
+            )
+            return final_reply
         except Exception as exc:
                 detail = f"Import run failed: {exc}"
                 execution_plan = self._mark_execution_plan_status(

@@ -38,6 +38,8 @@ async def lifespan(app: FastAPI):
         summary_model=settings.summary_model,
         embedding_model=settings.embedding_model,
         system_prompt=settings.llm_system_prompt,
+        embedding_api_key=settings.embedding_api_key,
+        embedding_base_url=settings.embedding_base_url,
     )
     user_memory = UserMemoryManager(repository)
     bilibili_favorites = BilibiliFavoriteFolderService()

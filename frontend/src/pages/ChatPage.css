@@ -174,3 +174,66 @@
   50%       { opacity: 0; }
 }
 
+/* Agent status bar */
+.agent-status-bar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+  margin-bottom: 0.6rem;
+  align-items: center;
+}
+
+.agent-step {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  font-size: 0.72rem;
+  padding: 0.18rem 0.55rem;
+  border-radius: 99px;
+  border: 1px solid var(--border);
+  background: var(--bg3);
+  color: var(--text3);
+  transition: all 0.2s;
+}
+
+.agent-step.done {
+  color: var(--accent);
+  border-color: var(--accent-dim);
+  background: var(--accent-dim);
+}
+
+.agent-step.running {
+  color: var(--text2);
+  border-color: var(--border);
+  background: var(--bg3);
+  animation: stepPulse 1.2s ease-in-out infinite;
+}
+
+@keyframes stepPulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.5; }
+}
+
+.agent-step-icon {
+  font-size: 0.75rem;
+  line-height: 1;
+}
+
+.agent-step-label {
+  line-height: 1;
+}
+
+.agent-step-spinner {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border: 1.5px solid var(--text3);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: spin 0.7s linear infinite;
+}
+
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+

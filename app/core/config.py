@@ -37,6 +37,14 @@ class Settings(BaseSettings):
         default="openai/text-embedding-3-small",
         validation_alias=AliasChoices("EMBEDDING_MODEL", "OPENROUTER_EMBEDDING_MODEL"),
     )
+    embedding_api_key: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("EMBEDDING_API_KEY"),
+    )
+    embedding_base_url: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("EMBEDDING_BASE_URL"),
+    )
     llm_system_prompt: str = (
         "You are BIliBIlAgent. Answer directly when the user asks for general chat. "
         "Keep responses concise and helpful."
