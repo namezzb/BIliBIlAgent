@@ -5,8 +5,6 @@ from typing import Any
 from app.db.repository import SQLiteRepository
 from app.services.bilibili_favorites import BilibiliFavoriteFolderService
 from app.services.knowledge_index import DuplicateKnowledgeVideoError, KnowledgeIndexService
-from app.services.runtime_audit import LangSmithRuntimeAudit, NoOpRuntimeAudit
-
 
 class BilibiliImportPipeline:
     def __init__(
@@ -15,12 +13,10 @@ class BilibiliImportPipeline:
         repository: SQLiteRepository,
         favorites_service: BilibiliFavoriteFolderService,
         knowledge_index: KnowledgeIndexService,
-        runtime_audit: LangSmithRuntimeAudit | None = None,
     ) -> None:
         self.repository = repository
         self.favorites_service = favorites_service
         self.knowledge_index = knowledge_index
-        self.runtime_audit = runtime_audit or NoOpRuntimeAudit()
 
     def build_execution_plan(
         self,
@@ -129,233 +125,158 @@ class BilibiliImportPipeline:
         favorite_folder_id: str,
         selected_video_ids: list[str],
     ) -> str:
-        existing_run = self.repository.get_run(run_id)
+        try:
+            self.repository.update_run(
+                run_id,
+                intent="tool_request",
+                route="import_request",
+                status="running",
+                requires_confirmation=False,
+                approval_status="approved",
+            )
 
-        with self.runtime_audit.trace_request(
-            name="agent.import_selected_videos",
-            inputs={
-                "run_id": run_id,
-                "session_id": session_id,
-                "favorite_folder_id": favorite_folder_id,
-                "selected_video_ids": list(selected_video_ids),
-            },
-            metadata={
-                "thread_id": run_id,
-                "run_id": run_id,
-                "session_id": session_id,
-                "user_id": user_id,
-                "environment": self.runtime_audit.environment,
-                "app_name": self.runtime_audit.app_name,
-                "operation": "bilibili_import",
-            },
-            tags=["agent", "import", self.runtime_audit.environment],
-        ) as trace_run:
-            try:
-                self.repository.update_run(
-                    run_id,
-                    intent="tool_request",
-                    route="import_request",
-                    status="running",
-                    requires_confirmation=False,
-                    approval_status="approved",
-                )
+            self.repository.upsert_run_step(
+                run_id,
+                "execute_import",
+                "bilibili_import.execute_import",
+                "running",
+                input_summary=f"favorite_folder_id={favorite_folder_id}",
+                output_summary=f"queued {len(selected_video_ids)} selected video(s)",
+            )
 
-                self.repository.upsert_run_step(
-                    run_id,
-                    "execute_import",
-                    "bilibili_import.execute_import",
-                    "running",
-                    input_summary=f"favorite_folder_id={favorite_folder_id}",
-                    output_summary=f"queued {len(selected_video_ids)} selected video(s)",
-                )
-                self.repository.append_run_event(
-                    run_id,
-                    "import_started",
-                    {
-                        "route": "import_request",
-                        "favorite_folder_id": favorite_folder_id,
-                        "selected_video_count": len(selected_video_ids),
-                    },
-                )
+            validated = self.validate_selected_items(
+                cookie=cookie,
+                favorite_folder_id=favorite_folder_id,
+                selected_video_ids=selected_video_ids,
+            )
+            folder = dict(validated["folder"])
+            selected_items = [dict(item) for item in validated["selected_items"]]
+            self.repository.upsert_run_step(
+                run_id,
+                "validate_selection",
+                "validate_selection",
+                "completed",
+                input_summary=f"{len(selected_video_ids)} selection(s)",
+                output_summary=f"validated {len(selected_items)} selected video(s)",
+            )
 
-                validated = self.validate_selected_items(
-                    cookie=cookie,
-                    favorite_folder_id=favorite_folder_id,
-                    selected_video_ids=selected_video_ids,
+            existing_video_ids = set(
+                self.repository.get_existing_knowledge_video_ids(
+                    [str(item["video_id"]) for item in selected_items]
                 )
-                folder = dict(validated["folder"])
-                selected_items = [dict(item) for item in validated["selected_items"]]
-                self.repository.upsert_run_step(
-                    run_id,
-                    "validate_selection",
-                    "validate_selection",
-                    "completed",
-                    input_summary=f"{len(selected_video_ids)} selection(s)",
-                    output_summary=f"validated {len(selected_items)} selected video(s)",
-                )
-                self.repository.append_run_event(
-                    run_id,
-                    "import_selection_validated",
-                    {
-                        "route": "import_request",
-                        "favorite_folder_id": favorite_folder_id,
-                        "selected_video_ids": [item["video_id"] for item in selected_items],
-                    },
-                )
+            )
+            indexable_videos: list[dict[str, Any]] = []
+            pending_index_items: list[dict[str, Any]] = []
+            stats = {
+                "indexed": 0,
+                "needs_asr": 0,
+                "failed": 0,
+                "skipped_duplicate": 0,
+            }
 
-                existing_video_ids = set(
-                    self.repository.get_existing_knowledge_video_ids(
-                        [str(item["video_id"]) for item in selected_items]
+            for item in selected_items:
+                video_id = str(item["video_id"])
+                if video_id in existing_video_ids:
+                    self.repository.upsert_import_run_item(
+                        run_id,
+                        favorite_folder_id=favorite_folder_id,
+                        video_id=video_id,
+                        bvid=item.get("bvid"),
+                        title=str(item.get("title") or video_id),
+                        status="skipped_duplicate",
+                        manifest={
+                            "video_id": video_id,
+                            "favorite_folder_id": favorite_folder_id,
+                        },
                     )
-                )
-                indexable_videos: list[dict[str, Any]] = []
-                pending_index_items: list[dict[str, Any]] = []
-                stats = {
-                    "indexed": 0,
-                    "needs_asr": 0,
-                    "failed": 0,
-                    "skipped_duplicate": 0,
-                }
+                    self.repository.upsert_run_step(
+                        run_id,
+                        f"import_item_{video_id}",
+                        f"import_item:{video_id}",
+                        "completed",
+                        input_summary="duplicate check",
+                        output_summary="skipped duplicate knowledge video",
+                    )
+                    stats["skipped_duplicate"] += 1
+                    continue
 
-                for item in selected_items:
-                    video_id = str(item["video_id"])
-                    if video_id in existing_video_ids:
+                item_result = self._process_selected_item(
+                    run_id=run_id,
+                    favorite_folder=folder,
+                    item=item,
+                    cookie=cookie,
+                )
+                if item_result["status"] == "ready_for_index":
+                    indexable_videos.append(item_result["knowledge_video"])
+                    pending_index_items.append(item_result)
+                    continue
+
+                stats[str(item_result["status"])] += 1
+
+            if indexable_videos:
+                try:
+                    index_result = self.knowledge_index.index_documents(
+                        {
+                            "favorite_folders": [folder],
+                            "videos": indexable_videos,
+                        }
+                    )
+                except DuplicateKnowledgeVideoError as exc:
+                    duplicate_ids = set(exc.video_ids)
+                    for item_result in pending_index_items:
+                        video_id = str(item_result["video_id"])
+                        if video_id not in duplicate_ids:
+                            continue
                         self.repository.upsert_import_run_item(
                             run_id,
                             favorite_folder_id=favorite_folder_id,
                             video_id=video_id,
-                            bvid=item.get("bvid"),
-                            title=str(item.get("title") or video_id),
+                            bvid=item_result.get("bvid"),
+                            title=str(item_result.get("title") or video_id),
                             status="skipped_duplicate",
-                            manifest={
-                                "video_id": video_id,
-                                "favorite_folder_id": favorite_folder_id,
-                            },
+                            manifest=item_result.get("manifest"),
                         )
                         self.repository.upsert_run_step(
                             run_id,
                             f"import_item_{video_id}",
                             f"import_item:{video_id}",
                             "completed",
-                            input_summary="duplicate check",
-                            output_summary="skipped duplicate knowledge video",
-                        )
-                        self.repository.append_run_event(
-                            run_id,
-                            "import_item_processed",
-                            {
-                                "video_id": video_id,
-                                "status": "skipped_duplicate",
-                                "title": item.get("title"),
-                            },
+                            input_summary="knowledge index duplicate check",
+                            output_summary="skipped duplicate during indexing",
                         )
                         stats["skipped_duplicate"] += 1
-                        continue
-
-                    item_result = self._process_selected_item(
-                        run_id=run_id,
-                        favorite_folder=folder,
-                        item=item,
-                        cookie=cookie,
+                else:
+                    self.repository.upsert_run_step(
+                        run_id,
+                        "knowledge_index",
+                        "knowledge_index",
+                        "completed",
+                        input_summary=f"{len(indexable_videos)} subtitle-backed video(s)",
+                        output_summary=(
+                            f"indexed {index_result['video_count']} video(s), "
+                            f"{index_result['chunk_count']} chunk(s)"
+                        ),
                     )
-                    if item_result["status"] == "ready_for_index":
-                        indexable_videos.append(item_result["knowledge_video"])
-                        pending_index_items.append(item_result)
-                        continue
-
-                    stats[str(item_result["status"])] += 1
-
-                if indexable_videos:
-                    try:
-                        index_result = self.knowledge_index.index_documents(
-                            {
-                                "favorite_folders": [folder],
-                                "videos": indexable_videos,
-                            }
+                    for item_result in pending_index_items:
+                        video_id = str(item_result["video_id"])
+                        self.repository.upsert_import_run_item(
+                            run_id,
+                            favorite_folder_id=favorite_folder_id,
+                            video_id=video_id,
+                            bvid=item_result.get("bvid"),
+                            title=str(item_result.get("title") or video_id),
+                            status="indexed",
+                            manifest=item_result.get("manifest"),
                         )
-                    except DuplicateKnowledgeVideoError as exc:
-                        duplicate_ids = set(exc.video_ids)
-                        for item_result in pending_index_items:
-                            video_id = str(item_result["video_id"])
-                            if video_id not in duplicate_ids:
-                                continue
-                            self.repository.upsert_import_run_item(
-                                run_id,
-                                favorite_folder_id=favorite_folder_id,
-                                video_id=video_id,
-                                bvid=item_result.get("bvid"),
-                                title=str(item_result.get("title") or video_id),
-                                status="skipped_duplicate",
-                                manifest=item_result.get("manifest"),
-                            )
-                            self.repository.upsert_run_step(
-                                run_id,
-                                f"import_item_{video_id}",
-                                f"import_item:{video_id}",
-                                "completed",
-                                input_summary="knowledge index duplicate check",
-                                output_summary="skipped duplicate during indexing",
-                            )
-                            self.repository.append_run_event(
-                                run_id,
-                                "import_item_processed",
-                                {
-                                    "video_id": video_id,
-                                    "status": "skipped_duplicate",
-                                    "title": item_result.get("title"),
-                                },
-                            )
-                            stats["skipped_duplicate"] += 1
-                    else:
                         self.repository.upsert_run_step(
                             run_id,
-                            "knowledge_index",
-                            "knowledge_index",
+                            f"import_item_{video_id}",
+                            f"import_item:{video_id}",
                             "completed",
-                            input_summary=f"{len(indexable_videos)} subtitle-backed video(s)",
-                            output_summary=(
-                                f"indexed {index_result['video_count']} video(s), "
-                                f"{index_result['chunk_count']} chunk(s)"
-                            ),
+                            input_summary="subtitle pipeline",
+                            output_summary="indexed into knowledge base",
                         )
-                        self.repository.append_run_event(
-                            run_id,
-                            "import_index_completed",
-                            {
-                                "video_count": index_result["video_count"],
-                                "chunk_count": index_result["chunk_count"],
-                                "page_count": index_result["page_count"],
-                            },
-                        )
-                        for item_result in pending_index_items:
-                            video_id = str(item_result["video_id"])
-                            self.repository.upsert_import_run_item(
-                                run_id,
-                                favorite_folder_id=favorite_folder_id,
-                                video_id=video_id,
-                                bvid=item_result.get("bvid"),
-                                title=str(item_result.get("title") or video_id),
-                                status="indexed",
-                                manifest=item_result.get("manifest"),
-                            )
-                            self.repository.upsert_run_step(
-                                run_id,
-                                f"import_item_{video_id}",
-                                f"import_item:{video_id}",
-                                "completed",
-                                input_summary="subtitle pipeline",
-                                output_summary="indexed into knowledge base",
-                            )
-                            self.repository.append_run_event(
-                                run_id,
-                                "import_item_processed",
-                                {
-                                    "video_id": video_id,
-                                    "status": "indexed",
-                                    "title": item_result.get("title"),
-                                },
-                            )
-                            stats["indexed"] += 1
+                        stats["indexed"] += 1
 
                 final_reply = self._build_completion_reply(stats)
                 execution_plan = self._mark_execution_plan_status(
@@ -380,28 +301,8 @@ class BilibiliImportPipeline:
                     input_summary=f"favorite_folder_id={favorite_folder_id}",
                     output_summary=final_reply,
                 )
-                self.repository.append_run_event(
-                    run_id,
-                    "run_completed",
-                    {
-                        "status": "completed",
-                        "route": "import_request",
-                        "reply": final_reply,
-                        "execution_plan": execution_plan,
-                    },
-                )
-                trace_run.end(
-                    outputs=self.runtime_audit.sanitize_payload(
-                        {
-                            "run_id": run_id,
-                            "status": "completed",
-                            "summary": stats,
-                            "reply": final_reply,
-                        }
-                    )
-                )
                 return final_reply
-            except Exception as exc:
+        except Exception as exc:
                 detail = f"Import run failed: {exc}"
                 execution_plan = self._mark_execution_plan_status(
                     self.build_execution_plan(
@@ -418,27 +319,12 @@ class BilibiliImportPipeline:
                     input_summary=f"favorite_folder_id={favorite_folder_id}",
                     output_summary=detail,
                 )
-                self.repository.append_run_event(
-                    run_id,
-                    "run_failed",
-                    {
-                        "status": "failed",
-                        "route": "import_request",
-                        "reply": detail,
-                        "execution_plan": execution_plan,
-                    },
-                )
                 self.repository.update_run(
                     run_id,
                     status="failed",
                     latest_reply=detail,
                     execution_plan=execution_plan,
                     approval_status="approved",
-                )
-                trace_run.end(
-                    outputs=self.runtime_audit.sanitize_payload(
-                        {"run_id": run_id, "status": "failed", "error": detail}
-                    )
                 )
                 raise
 
@@ -476,16 +362,6 @@ class BilibiliImportPipeline:
                 input_summary="fetch video view",
                 output_summary=str(exc),
             )
-            self.repository.append_run_event(
-                run_id,
-                "import_item_processed",
-                {
-                    "video_id": video_id,
-                    "status": "failed",
-                    "title": title,
-                    "failure_reason": str(exc),
-                },
-            )
             return {"status": "failed", "video_id": video_id, "title": title}
 
         pages = view.get("pages") or []
@@ -507,16 +383,6 @@ class BilibiliImportPipeline:
                 "failed",
                 input_summary="validate video pages",
                 output_summary=detail,
-            )
-            self.repository.append_run_event(
-                run_id,
-                "import_item_processed",
-                {
-                    "video_id": video_id,
-                    "status": "failed",
-                    "title": title,
-                    "failure_reason": detail,
-                },
             )
             return {"status": "failed", "video_id": video_id, "title": title}
 
@@ -705,16 +571,6 @@ class BilibiliImportPipeline:
             "completed" if status == "needs_asr" else "failed",
             input_summary="subtitle/asr fallback pipeline",
             output_summary="prepared ASR fallback job" if status == "needs_asr" else failure_reason,
-        )
-        self.repository.append_run_event(
-            run_id,
-            "import_item_processed",
-            {
-                "video_id": video_id,
-                "status": status,
-                "title": title,
-                "needs_asr": status == "needs_asr",
-            },
         )
         return {"status": status, "video_id": video_id, "title": title}
 

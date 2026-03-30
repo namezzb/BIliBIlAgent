@@ -64,15 +64,6 @@ def _record_run_failure(repository, run_id: str, detail: str) -> None:
         input_summary="request lifecycle",
         output_summary=detail,
     )
-    repository.append_run_event(
-        run_id,
-        "run_failed",
-        {
-            "status": "failed",
-            "route": None,
-            "reply": detail,
-        },
-    )
     repository.update_run(
         run_id,
         status="failed",
@@ -158,7 +149,6 @@ def get_run(run_id: str, request: Request) -> RunDetailResponse:
         approval_resolved_at=existing_run["approval_resolved_at"],
         created_at=existing_run["created_at"],
         updated_at=existing_run["updated_at"],
-        event_count=repository.get_run_event_count(run_id),
         steps=repository.get_run_steps(run_id),
     )
 
@@ -357,17 +347,6 @@ def submit_bilibili_import(
         "completed",
         input_summary=f"favorite_folder_id={payload.favorite_folder_id}",
         output_summary=f"accepted {len(validated['selected_video_ids'])} selected video(s)",
-    )
-    repository.append_run_event(
-        run_id,
-        "run_started",
-        {
-            "session_id": session_id,
-            "user_id": user_id,
-            "favorite_folder_id": payload.favorite_folder_id,
-            "selected_video_ids": list(validated["selected_video_ids"]),
-            "route": "import_request",
-        },
     )
 
     background_tasks.add_task(

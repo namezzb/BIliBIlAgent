@@ -72,7 +72,6 @@ class RunDetailResponse(ChatResponse):
     approval_resolved_at: str | None = None
     created_at: str
     updated_at: str
-    event_count: int
     steps: list[RunStepResponse] = Field(default_factory=list)
 
 

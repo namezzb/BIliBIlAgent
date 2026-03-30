@@ -169,80 +169,6 @@ class AgentOrchestrator:
             "pending_actions": final_state.get("pending_actions", []),
         }
 
-    async def invoke_chat(
-        self,
-        *,
-        session_id: str,
-        run_id: str,
-        message: str,
-        messages: list[dict[str, str]],
-        user_id: str | None = None,
-        session_summary: str | None = None,
-        recent_context: dict[str, object] | None = None,
-        user_memory_context: str | None = None,
-    ) -> dict[str, Any]:
-        initial_input = {
-            "session_id": session_id,
-            "user_id": user_id,
-            "run_id": run_id,
-            "current_message": message,
-            "messages": messages,
-            "session_summary": session_summary,
-            "recent_context": recent_context or {},
-            "user_memory_context": user_memory_context,
-            "status": "running",
-            "requires_confirmation": False,
-            "pending_actions": [],
-            "execution_plan": None,
-        }
-        graph_config = {"configurable": {"thread_id": run_id}}
-        final_state: dict[str, Any] = {}
-        interrupted = False
-        async for event in self.graph.astream(
-            initial_input,
-            config=graph_config,
-            stream_mode="updates",
-        ):
-            if "__interrupt__" in event:
-                interrupted = True
-                # Capture interrupt payload so callers can build confirmation response
-                interrupt_list = event["__interrupt__"]
-                interrupt_value = interrupt_list[0].value if interrupt_list else {}
-                final_state.setdefault("requires_confirmation", True)
-                final_state.setdefault("status", "awaiting_confirmation")
-                final_state.setdefault("execution_plan", interrupt_value.get("execution_plan"))
-                final_state.setdefault("pending_actions", interrupt_value.get("pending_actions", []))
-                final_state.setdefault("response", interrupt_value.get("reply", ""))
-                break
-            for _node, state_diff in event.items():
-                if isinstance(state_diff, dict):
-                    final_state.update(state_diff)
-        if not interrupted:
-            snap = await self.graph.aget_state(graph_config)
-            if snap and snap.values:
-                final_state.update(snap.values)
-        return self._state_to_response(run_id, session_id, final_state)
-
-    async def resume_run(self, run_id: str, approved: bool) -> dict[str, Any]:
-        run = self.repository.get_run(run_id)
-        session_id = run["session_id"] if run is not None else ""
-        graph_config = {"configurable": {"thread_id": run_id}}
-        final_state: dict[str, Any] = {}
-        async for event in self.graph.astream(
-            Command(resume={"approved": approved}),
-            config=graph_config,
-            stream_mode="updates",
-        ):
-            if "__interrupt__" in event:
-                break
-            for _node, state_diff in event.items():
-                if isinstance(state_diff, dict):
-                    final_state.update(state_diff)
-        snap = await self.graph.aget_state(graph_config)
-        if snap and snap.values:
-            final_state.update(snap.values)
-        return self._state_to_response(run_id, session_id, final_state)
-
     def _build_graph(self):
         builder = StateGraph(AgentState)
         builder.add_node("load_context", self._load_context)
@@ -284,30 +210,6 @@ class AgentOrchestrator:
         builder.add_edge("finalize_run", END)
 
         return builder.compile(checkpointer=self.checkpointer)
-
-    def _state_to_response(
-        self, run_id: str, session_id: str, state: dict[str, Any]
-    ) -> dict[str, Any]:
-        """Build a sync-compatible response dict directly from graph final_state."""
-        status = state.get("status", "completed")
-        requires_confirmation = bool(state.get("requires_confirmation", False))
-        if requires_confirmation and status not in {"awaiting_confirmation", "running"}:
-            status = "awaiting_confirmation"
-        return {
-            "run_id": run_id,
-            "session_id": session_id,
-            "intent": state.get("intent"),
-            "route": state.get("route"),
-            "status": status,
-            "reply": state.get("response", ""),
-            "requires_confirmation": requires_confirmation,
-            "approval_status": state.get("approval_status"),
-            "execution_plan": state.get("execution_plan"),
-            "pending_actions": state.get("pending_actions", []),
-            "approval_requested_at": None,
-            "approval_resolved_at": None,
-            "retrieval_result": state.get("retrieval_result"),
-        }
 
     def _route_after_plan(self, state: AgentState) -> str:
         if state.get("requires_confirmation"):

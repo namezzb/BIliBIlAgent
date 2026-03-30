@@ -1,14 +1,5 @@
 import { api, apiBase } from './client';
 
-export const sendChat = (payload: {
-  session_id?: string;
-  user_id?: string;
-  message: string;
-}) => api.post('/api/chat', payload).then((r) => r.data);
-
-export const confirmRun = (runId: string, approved: boolean) =>
-  api.post(`/api/runs/${runId}/confirm`, { approved }).then((r) => r.data);
-
 export const getRun = (runId: string) =>
   api.get(`/api/runs/${runId}`).then((r) => r.data);
 
@@ -32,10 +23,6 @@ export const knowledgeSearch = (payload: {
   favorite_folder_ids?: string[];
   video_ids?: string[];
 }) => api.post('/api/knowledge/search', payload).then((r) => r.data);
-
-export function createRunEventSource(runId: string, follow = true): EventSource {
-  return new EventSource(`${apiBase}/api/runs/${runId}/events?follow=${follow}`);
-}
 
 // ── Streaming helpers ────────────────────────────────────────────────────────
 

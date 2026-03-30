@@ -51,18 +51,7 @@ SCHEMA_STATEMENTS = [
         UNIQUE(run_id, step_key)
     )
     """,
-    """
-    CREATE TABLE IF NOT EXISTS run_events (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        event_id TEXT NOT NULL UNIQUE,
-        run_id TEXT NOT NULL,
-        sequence INTEGER NOT NULL,
-        event_type TEXT NOT NULL,
-        payload_json TEXT NOT NULL,
-        created_at TEXT NOT NULL,
-        UNIQUE(run_id, sequence)
-    )
-    """,
+
     """
     CREATE TABLE IF NOT EXISTS import_run_items (
         id INTEGER PRIMARY KEY AUTOINCREMENT,

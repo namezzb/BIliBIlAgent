@@ -17,25 +17,6 @@ RunStatus = Literal["running", "completed", "awaiting_confirmation", "cancelled"
 ExecutionStepStatus = Literal["pending", "approved", "cancelled", "completed"]
 
 
-RunEventType = Literal[
-    "run_started",
-    "context_loaded",
-    "intent_classified",
-    "response_prepared",
-    "confirmation_required",
-    "confirmation_resolved",
-    "tool_execution_started",
-    "tool_execution_finished",
-    "knowledge_retrieval_completed",
-    "import_started",
-    "import_selection_validated",
-    "import_item_processed",
-    "import_index_completed",
-    "run_completed",
-    "run_failed",
-]
-
-
 class PendingAction(TypedDict, total=False):
     tool: str
     action: str
@@ -88,10 +69,4 @@ class AgentState(TypedDict, total=False):
     response: str
 
 
-class RunEvent(TypedDict):
-    event_id: str
-    run_id: str
-    sequence: int
-    type: RunEventType
-    timestamp: str
-    payload: dict[str, object]
+
