@@ -17,6 +17,9 @@ export const patchUserMemory = (
 export const deleteUserMemory = (userId: string, group: string, key: string) =>
   api.delete(`/api/users/${userId}/memory/${group}/${encodeURIComponent(key)}`).then((r) => r.data);
 
+export const getImportItems = (runId: string) =>
+  api.get(`/api/runs/${runId}/import-items`).then((r) => r.data);
+
 export const knowledgeSearch = (payload: {
   query: string;
   top_k?: number;

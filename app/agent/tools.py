@@ -56,13 +56,6 @@ class BilibiliRetryToolInput(BaseModel):
     target: str = Field(min_length=1)
 
 
-class KnowledgeRetrievalToolInput(BaseModel):
-    message: str = Field(min_length=1)
-    route: str | None = None
-    recent_context: dict[str, Any] = Field(default_factory=dict)
-    top_k: int = Field(default=5, ge=1, le=10)
-
-
 @tool(args_schema=BilibiliRetryToolInput)
 def bilibili_retry(request_message: str, target: str) -> str:
     """Run the approved Bilibili retry placeholder tool for failed ingestion items."""
@@ -71,34 +64,6 @@ def bilibili_retry(request_message: str, target: str) -> str:
         f"{target} based on request: {request_message}. Real retry tools are not "
         "wired in yet."
     )
-
-
-def build_knowledge_retrieval_tool(retrieval_service) -> BaseTool:
-    @tool("knowledge_retrieval", args_schema=KnowledgeRetrievalToolInput, response_format="content_and_artifact")
-    def knowledge_retrieval(
-        message: str,
-        route: str | None = None,
-        recent_context: dict[str, Any] | None = None,
-        top_k: int = 5,
-    ) -> tuple[str, dict[str, Any]]:
-        """Retrieve grounded Bilibili knowledge for a chat question."""
-        result = retrieval_service.retrieve_for_question(
-            message=message,
-            route=route,
-            recent_context=recent_context or {},
-            top_k=top_k,
-        )
-        artifact = {
-            "query": result["query"],
-            "route": result["route"],
-            "resolved_scope": result["resolved_scope"],
-            "total_hits": result["total_hits"],
-            "hits": result["hits"],
-            "top_sources": result["top_sources"],
-        }
-        return str(result["serialized_context"]), artifact
-
-    return knowledge_retrieval
 
 
 def build_tool_registry(import_tool: BaseTool) -> dict[tuple[str, str], BaseTool]:

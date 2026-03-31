@@ -3,8 +3,6 @@ from __future__ import annotations
 import re
 from typing import Any
 
-from langchain_core.documents import Document
-
 from app.db.repository import SQLiteRepository
 from app.services.knowledge_index import KnowledgeIndexService
 
@@ -47,11 +45,17 @@ class KnowledgeRetrievalService:
         route: str | None,
         recent_context: dict[str, object] | None = None,
         top_k: int = 5,
+        mentioned_bvids: list[str] | None = None,
+        mentioned_video_titles: list[str] | None = None,
+        mentioned_folder_names: list[str] | None = None,
     ) -> dict[str, Any]:
         resolved_scope = self._resolve_scope(
             message=message,
             route=route,
             recent_context=recent_context or {},
+            mentioned_bvids=mentioned_bvids or [],
+            mentioned_video_titles=mentioned_video_titles or [],
+            mentioned_folder_names=mentioned_folder_names or [],
         )
         search_payload = {
             "query": message,
@@ -63,7 +67,6 @@ class KnowledgeRetrievalService:
         }
         search_result = self.search(search_payload)
         hits = list(search_result.get("hits", []))
-        documents = self._build_documents(hits)
         top_sources = self._top_sources(hits)
         return {
             "query": message,
@@ -71,7 +74,6 @@ class KnowledgeRetrievalService:
             "resolved_scope": resolved_scope,
             "total_hits": int(search_result.get("total_hits", 0)),
             "hits": hits,
-            "documents": documents,
             "serialized_context": self._serialize_hits(hits),
             "top_sources": top_sources,
         }
@@ -82,6 +84,9 @@ class KnowledgeRetrievalService:
         message: str,
         route: str | None,
         recent_context: dict[str, object],
+        mentioned_bvids: list[str],
+        mentioned_video_titles: list[str],
+        mentioned_folder_names: list[str],
     ) -> dict[str, list[Any]]:
         lowered = message.lower()
         favorite_folder_ids: list[str] = []
@@ -92,13 +97,41 @@ class KnowledgeRetrievalService:
         videos = self.repository.list_knowledge_videos()
         folders = self.repository.list_knowledge_favorite_folders()
 
-        explicit_video_ids = self._match_video_ids(lowered, videos)
-        explicit_folder_ids = self._match_favorite_folder_ids(lowered, folders)
+        # Priority 1: LLM-identified BV IDs (precise, no regex ambiguity)
+        if mentioned_bvids:
+            bv_upper = {bv.upper() for bv in mentioned_bvids}
+            for video in videos:
+                if str(video.get("bvid") or "").upper() in bv_upper:
+                    video_ids.append(str(video["video_id"]))
+            video_ids = sorted(set(video_ids))
 
-        if explicit_video_ids:
-            video_ids = explicit_video_ids
-        if explicit_folder_ids:
-            favorite_folder_ids = explicit_folder_ids
+        # Priority 2: LLM-identified folder names (exact match against DB)
+        if mentioned_folder_names:
+            folder_names_lower = {n.lower() for n in mentioned_folder_names}
+            for folder in folders:
+                if str(folder["title"]).lower() in folder_names_lower:
+                    favorite_folder_ids.append(str(folder["favorite_folder_id"]))
+            favorite_folder_ids = sorted(set(favorite_folder_ids))
+
+        # Priority 3: LLM-identified video titles — only match if title length >= 5
+        if not video_ids and mentioned_video_titles:
+            title_lower_set = {t.lower() for t in mentioned_video_titles if len(t) >= 5}
+            for video in videos:
+                if str(video["title"]).lower() in title_lower_set:
+                    video_ids.append(str(video["video_id"]))
+            video_ids = sorted(set(video_ids))
+
+        # Fallback: regex BV/AV matching from raw message
+        if not video_ids:
+            explicit_video_ids = self._match_video_ids(lowered, videos)
+            if explicit_video_ids:
+                video_ids = explicit_video_ids
+
+        # Fallback: substring folder matching from raw message (guarded by length)
+        if not favorite_folder_ids:
+            explicit_folder_ids = self._match_favorite_folder_ids(lowered, folders)
+            if explicit_folder_ids:
+                favorite_folder_ids = explicit_folder_ids
 
         previous_scope = self._get_previous_scope(recent_context)
         if self._should_use_previous_scope(lowered) or (
@@ -187,25 +220,6 @@ class KnowledgeRetrievalService:
 
     def _should_use_previous_scope(self, lowered: str) -> bool:
         return any(token in lowered for token in PREVIOUS_SCOPE_HINTS)
-
-    def _build_documents(self, hits: list[dict[str, Any]]) -> list[Document]:
-        documents: list[Document] = []
-        for hit in hits:
-            documents.append(
-                Document(
-                    page_content=str(hit["text"]),
-                    metadata={
-                        "chunk_id": hit["chunk_id"],
-                        "score": hit["score"],
-                        "source_type": hit["source_type"],
-                        "source_language": hit.get("source_language"),
-                        "favorite_folders": hit.get("favorite_folders", []),
-                        "pages": hit.get("pages", []),
-                        "video": hit["video"],
-                    },
-                )
-            )
-        return documents
 
     def _serialize_hits(self, hits: list[dict[str, Any]]) -> str:
         if not hits:

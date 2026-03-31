@@ -93,7 +93,7 @@ async def test_astream_chat_yields_token_and_done():
     token_msg = AIMessageChunk(content="Hello")
     updates_chunk = {"finalize_run": {"status": "completed", "response": "Hello", "route": "general_chat", "intent": "general_chat"}}
 
-    async def fake_astream(input_, config, stream_mode):
+    async def fake_astream(input_, config, stream_mode, **kwargs):
         # Simulate ("messages", (msg, metadata)) then ("updates", data)
         yield ("messages", (token_msg, {}))
         yield ("updates", updates_chunk)
@@ -139,7 +139,7 @@ async def test_astream_chat_yields_interrupt_chunk():
 
     interrupt_value = {"question": "Approve?", "execution_plan": {"goal": "import", "steps": [], "tool_calls": [], "summary": ""}, "pending_actions": []}
 
-    async def fake_astream(input_, config, stream_mode):
+    async def fake_astream(input_, config, stream_mode, **kwargs):
         yield ("updates", {"__interrupt__": [Interrupt(value=interrupt_value)]})
 
     orch = MagicMock(spec=AgentOrchestrator)
@@ -173,7 +173,7 @@ async def test_astream_resume_yields_token_and_done():
     run_id = str(uuid4())
     token_msg = AIMessageChunk(content="Done!")
 
-    async def fake_astream(command, config, stream_mode):
+    async def fake_astream(command, config, stream_mode, **kwargs):
         yield ("messages", (token_msg, {}))
         yield ("updates", {"finalize_run": {"status": "completed", "response": "Done!", "approval_status": "approved"}})
 
@@ -196,6 +196,7 @@ async def test_astream_resume_yields_token_and_done():
 
 # ── 4. invoke_chat — builds response from final_state, no events.py ──────────
 
+@pytest.mark.skip(reason="invoke_chat and _state_to_response were removed in RAG refactor")
 @pytest.mark.asyncio
 async def test_invoke_chat_builds_response_from_state():
     """

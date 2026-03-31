@@ -35,7 +35,10 @@ Rules:
 1. If the message mentions importing AND querying, prefer import_request.
 2. If unsure between favorite_knowledge_query and video_knowledge_query, prefer favorite_knowledge_query.
 3. Default to general_chat when no specific route fits.
-4. Reply ONLY with the structured JSON — no extra text.
+4. For mentioned_bvids: extract any BV/AV IDs found in the message (e.g. BV1xx411c7mD). Empty list if none.
+5. For mentioned_video_titles: extract explicit video title strings the user refers to. Empty list if none.
+6. For mentioned_folder_names: extract explicit favorite folder names the user refers to. Empty list if none.
+7. Reply ONLY with the structured JSON — no extra text.
 """
 
 _LLM_ROUTE_TO_GRAPH_ROUTE: dict[str, RouteType] = {
@@ -61,7 +64,6 @@ class AgentOrchestrator:
         user_memory: UserMemoryManager,
         tool_registry: dict[tuple[str, str], Any],
         knowledge_retrieval_service: KnowledgeRetrievalService,
-        knowledge_retrieval_tool: Any,
         knowledge_qa: KnowledgeGroundedQAService,
     ) -> None:
         self.repository = repository
@@ -69,7 +71,6 @@ class AgentOrchestrator:
         self.user_memory = user_memory
         self.tools = tool_registry
         self.knowledge_retrieval_service = knowledge_retrieval_service
-        self.knowledge_retrieval_tool = knowledge_retrieval_tool
         self.knowledge_qa = knowledge_qa
         self.checkpointer = checkpointer
         self._router_llm = llm.get_lc_chat_model().with_structured_output(RouteDecision)
@@ -109,6 +110,9 @@ class AgentOrchestrator:
             "pending_actions": [],
             "execution_plan": None,
             "retrieval_scope_hint": None,
+            "mentioned_bvids": [],
+            "mentioned_video_titles": [],
+            "mentioned_folder_names": [],
         }
         config = {"configurable": {"thread_id": run_id}}
         final_state: dict[str, Any] = {}
@@ -148,6 +152,7 @@ class AgentOrchestrator:
             "status": final_state.get("status", "completed"),
             "reply": final_state.get("response", ""),
             "route": final_state.get("route"),
+            "retrieval_result": final_state.get("retrieval_result"),
             "requires_confirmation": final_state.get("requires_confirmation", False),
             "approval_status": final_state.get("approval_status"),
             "execution_plan": final_state.get("execution_plan"),
@@ -288,15 +293,22 @@ class AgentOrchestrator:
 
     def _router(self, state: AgentState) -> dict[str, Any]:
         """Classify message into 3-way RouteType + fine-grained retrieval_scope_hint."""
-        llm_route = self._llm_detect_llm_route(state["current_message"])
-        graph_route: RouteType = _LLM_ROUTE_TO_GRAPH_ROUTE[llm_route]
-        scope_hint: RetrievalScopeHint | None = _LLM_ROUTE_TO_SCOPE_HINT.get(llm_route)
+        decision = self._llm_detect_route_decision(state["current_message"])
+        graph_route: RouteType = _LLM_ROUTE_TO_GRAPH_ROUTE[decision.route]
+        scope_hint: RetrievalScopeHint | None = _LLM_ROUTE_TO_SCOPE_HINT.get(decision.route)
         self.repository.upsert_run_step(
             state["run_id"], "router", "router", "completed",
             input_summary=state["current_message"],
-            output_summary=f"llm_route={llm_route} -> route={graph_route}",
+            output_summary=f"llm_route={decision.route} -> route={graph_route}",
         )
-        return {"route": graph_route, "retrieval_scope_hint": scope_hint}
+        return {
+            "route": graph_route,
+            "retrieval_scope_hint": scope_hint,
+            # Pass LLM-identified entity references to scope resolution
+            "mentioned_bvids": decision.mentioned_bvids,
+            "mentioned_video_titles": decision.mentioned_video_titles,
+            "mentioned_folder_names": decision.mentioned_folder_names,
+        }
 
     def _general_chat(self, state: AgentState) -> dict[str, Any]:
         """Handle general conversation and user-memory commands."""
@@ -335,31 +347,18 @@ class AgentOrchestrator:
         }
 
     def _retrieve_knowledge(self, state: AgentState) -> dict[str, Any]:
-        """Execute knowledge retrieval using retrieval_scope_hint for scope resolution."""
+        """Execute knowledge retrieval directly via service (no Tool wrapper)."""
         scope_hint = state.get("retrieval_scope_hint") or "general_knowledge_query"
-        tool_message = self.knowledge_retrieval_tool.invoke(
-            {
-                "type": "tool_call",
-                "name": "knowledge_retrieval",
-                "id": f"knowledge-retrieval-{uuid4()}",
-                "args": {
-                    "message": state["current_message"],
-                    "route": scope_hint,
-                    "recent_context": state.get("recent_context", {}),
-                    "top_k": 5,
-                },
-            }
+        # Directly call the service — single source of truth, no artifact/content split
+        retrieval_result = self.knowledge_retrieval_service.retrieve_for_question(
+            message=state["current_message"],
+            route=scope_hint,
+            recent_context=state.get("recent_context", {}),
+            top_k=5,
+            mentioned_bvids=state.get("mentioned_bvids") or [],
+            mentioned_video_titles=state.get("mentioned_video_titles") or [],
+            mentioned_folder_names=state.get("mentioned_folder_names") or [],
         )
-        artifact = tool_message.artifact if isinstance(getattr(tool_message, "artifact", None), dict) else {}
-        retrieval_result = {
-            "query": artifact.get("query", state["current_message"]),
-            "route": artifact.get("route", scope_hint),
-            "resolved_scope": artifact.get("resolved_scope", {}),
-            "total_hits": artifact.get("total_hits", 0),
-            "hits": artifact.get("hits", []),
-            "serialized_context": str(tool_message.content),
-            "top_sources": artifact.get("top_sources", []),
-        }
         output_summary = (
             f"retrieved {retrieval_result['total_hits']} hit(s); "
             f"sources={', '.join(retrieval_result.get('top_sources', [])) or 'none'}"
@@ -497,16 +496,18 @@ class AgentOrchestrator:
             "status": status,
             "execution_plan": state.get("execution_plan"),
             "pending_actions": state.get("pending_actions", []),
+            # Carry retrieval_result through so done_payload can pass it to session_memory
+            "retrieval_result": state.get("retrieval_result"),
         }
 
     # ------------------------------------------------------------------
     # LLM / keyword routing helpers
     # ------------------------------------------------------------------
 
-    def _llm_detect_llm_route(self, message: str) -> str:
-        """Use LLM structured output to classify message. Falls back to keywords."""
+    def _llm_detect_route_decision(self, message: str) -> RouteDecision:
+        """Use LLM structured output to classify message and extract entity references."""
         if not self.llm.api_key:
-            return self._keyword_detect_llm_route(message)
+            return self._keyword_detect_route_decision(message)
         try:
             decision: RouteDecision = self._router_llm.invoke(
                 [
@@ -514,9 +515,14 @@ class AgentOrchestrator:
                     HumanMessage(content=message),
                 ]
             )
-            return decision.route
+            return decision
         except Exception:
-            return self._keyword_detect_llm_route(message)
+            return self._keyword_detect_route_decision(message)
+
+    def _keyword_detect_route_decision(self, message: str) -> RouteDecision:
+        """Keyword fallback returning a RouteDecision with empty entity lists."""
+        route = self._keyword_detect_llm_route(message)
+        return RouteDecision(route=route, reason="keyword fallback")
 
     def _keyword_detect_llm_route(self, message: str) -> str:
         """Keyword fallback returning the fine-grained 5-way route string."""

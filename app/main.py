@@ -8,7 +8,6 @@ from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 
 from app.agent.tools import (
     build_bilibili_import_tool,
-    build_knowledge_retrieval_tool,
     build_tool_registry,
 )
 from app.agent.service import AgentOrchestrator
@@ -17,10 +16,10 @@ from app.core.config import Settings, get_settings
 from app.db.repository import SQLiteRepository
 from app.services.bilibili_favorites import BilibiliFavoriteFolderService
 from app.services.bilibili_import import BilibiliImportPipeline
-from app.services.knowledge_index import ChromaVectorIndex, KnowledgeIndexService
+from app.services.knowledge_index import KnowledgeIndexService
 from app.services.knowledge_qa import KnowledgeGroundedQAService
 from app.services.knowledge_retrieval import KnowledgeRetrievalService
-from app.services.llm import OpenAICompatibleLLM
+from app.services.llm import OpenAICompatibleLLM, LangChainEmbeddingsAdapter
 from app.services.session_memory import SessionMemoryManager
 from app.services.user_memory import UserMemoryManager
 
@@ -43,13 +42,12 @@ async def lifespan(app: FastAPI):
     )
     user_memory = UserMemoryManager(repository)
     bilibili_favorites = BilibiliFavoriteFolderService()
+    lc_embeddings = LangChainEmbeddingsAdapter(llm)
     knowledge_index = KnowledgeIndexService(
         repository=repository,
-        vector_index=ChromaVectorIndex(
-            persist_dir=settings.chroma_persist_dir,
-            collection_name=settings.chroma_collection_name,
-        ),
-        embed_texts=llm.embed_texts,
+        lc_embeddings=lc_embeddings,
+        persist_dir=settings.chroma_persist_dir,
+        collection_name=settings.chroma_collection_name,
         embedding_model=settings.embedding_model,
         embedding_version=settings.knowledge_embedding_version,
         chunk_size=settings.knowledge_chunk_size,
@@ -61,7 +59,6 @@ async def lifespan(app: FastAPI):
         knowledge_index=knowledge_index,
     )
     knowledge_retrieval_service = KnowledgeRetrievalService(repository, knowledge_index)
-    knowledge_retrieval_tool = build_knowledge_retrieval_tool(knowledge_retrieval_service)
     knowledge_qa = KnowledgeGroundedQAService(llm)
     bilibili_import_tool = build_bilibili_import_tool(bilibili_import_pipeline)
 
@@ -75,7 +72,6 @@ async def lifespan(app: FastAPI):
             user_memory=user_memory,
             tool_registry=build_tool_registry(bilibili_import_tool),
             knowledge_retrieval_service=knowledge_retrieval_service,
-            knowledge_retrieval_tool=knowledge_retrieval_tool,
             knowledge_qa=knowledge_qa,
         )
         session_memory = SessionMemoryManager(repository, llm)
@@ -89,7 +85,6 @@ async def lifespan(app: FastAPI):
         app.state.bilibili_import_tool = bilibili_import_tool
         app.state.knowledge_index = knowledge_index
         app.state.knowledge_retrieval = knowledge_retrieval_service
-        app.state.knowledge_retrieval_tool = knowledge_retrieval_tool
         app.state.knowledge_qa = knowledge_qa
 
         try:

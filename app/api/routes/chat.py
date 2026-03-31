@@ -127,6 +127,20 @@ def _execute_bilibili_import_in_background(
         return None
 
 
+@router.get("/runs/{run_id}/import-items")
+def get_run_import_items(run_id: str, request: Request) -> dict:
+    repository = request.app.state.repository
+    existing_run = repository.get_run(run_id)
+    if existing_run is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Run not found.")
+    items = repository.get_import_run_items(run_id)
+    return {
+        "run_id": run_id,
+        "status": existing_run["status"],
+        "items": items,
+    }
+
+
 @router.get("/runs/{run_id}", response_model=RunDetailResponse)
 def get_run(run_id: str, request: Request) -> RunDetailResponse:
     repository = request.app.state.repository
@@ -497,7 +511,7 @@ async def chat_stream(request: Request, payload: ChatRequest) -> StreamingRespon
                 status=result["status"],
                 reply=result["reply"],
                 pending_actions=result["pending_actions"],
-                retrieval_result=None,
+                retrieval_result=done_payload.get("retrieval_result"),
             )
 
     return StreamingResponse(
@@ -578,7 +592,7 @@ async def confirm_run_stream(
                 status=result["status"],
                 reply=result["reply"],
                 pending_actions=result["pending_actions"],
-                retrieval_result=None,
+                retrieval_result=done_payload.get("retrieval_result"),
             )
 
     return StreamingResponse(

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from langchain_core.output_parsers import StrOutputParser
 from langchain_core.prompts import ChatPromptTemplate
 
 from app.services.llm import OpenAICompatibleLLM
@@ -32,6 +33,8 @@ class KnowledgeGroundedQAService:
                 ),
             ]
         )
+        # LCEL chain: LangGraph stream_mode='messages' captures tokens automatically
+        self._chain = self.prompt | llm.get_lc_chat_model() | StrOutputParser()
 
     def answer(self, *, question: str, retrieval_result: dict[str, Any]) -> str:
         hits = list(retrieval_result.get("hits", []))
@@ -41,11 +44,12 @@ class KnowledgeGroundedQAService:
         if not self.llm.api_key:
             return self._fallback_answer(question=question, hits=hits)
 
-        prompt_messages = self.prompt.format_messages(
-            question=question,
-            context=str(retrieval_result.get("serialized_context", "")),
-        )
-        response = self.llm.chat(self._to_chat_messages(prompt_messages))
+        context = str(retrieval_result.get("serialized_context", ""))
+        try:
+            # Invoke LCEL chain — single source for both invoke and streaming
+            response = self._chain.invoke({"question": question, "context": context})
+        except Exception as exc:
+            return self._fallback_answer(question=question, hits=hits)
         return self._ensure_sources(response, hits)
 
     def _fallback_answer(self, *, question: str, hits: list[dict[str, Any]]) -> str:
@@ -101,12 +105,3 @@ class KnowledgeGroundedQAService:
             if len(formatted) >= 3:
                 break
         return "；".join(formatted)
-
-    def _to_chat_messages(self, prompt_messages: list[Any]) -> list[dict[str, str]]:
-        converted: list[dict[str, str]] = []
-        role_map = {"human": "user", "ai": "assistant"}
-        for message in prompt_messages:
-            role = role_map.get(getattr(message, "type", ""), getattr(message, "type", "user"))
-            content = message.content if isinstance(message.content, str) else str(message.content)
-            converted.append({"role": role, "content": content})
-        return converted

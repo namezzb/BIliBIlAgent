@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, Callable, Protocol
+from typing import Any
 
-import chromadb
+from langchain_chroma import Chroma
 from langchain_core.documents import Document
+from langchain_core.embeddings import Embeddings
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 
 from app.db.repository import SQLiteRepository
@@ -17,80 +18,35 @@ class DuplicateKnowledgeVideoError(ValueError):
         super().__init__(f"Videos already indexed and cannot be imported again: {joined}")
 
 
-class VectorIndex(Protocol):
-    def upsert(
-        self,
-        *,
-        ids: list[str],
-        embeddings: list[list[float]],
-        documents: list[str],
-        metadatas: list[dict[str, Any]],
-    ) -> None: ...
-
-    def delete(self, ids: list[str]) -> None: ...
-
-    def query(self, *, query_embedding: list[float], n_results: int) -> dict[str, Any]: ...
-
-    def count(self) -> int: ...
-
-
-class ChromaVectorIndex:
-    def __init__(self, persist_dir: Path, collection_name: str) -> None:
-        self.client = chromadb.PersistentClient(path=str(persist_dir))
-        self.collection = self.client.get_or_create_collection(name=collection_name)
-
-    def upsert(
-        self,
-        *,
-        ids: list[str],
-        embeddings: list[list[float]],
-        documents: list[str],
-        metadatas: list[dict[str, Any]],
-    ) -> None:
-        self.collection.upsert(
-            ids=ids,
-            embeddings=embeddings,
-            documents=documents,
-            metadatas=metadatas,
-        )
-
-    def delete(self, ids: list[str]) -> None:
-        if not ids:
-            return
-        self.collection.delete(ids=ids)
-
-    def query(self, *, query_embedding: list[float], n_results: int) -> dict[str, Any]:
-        return self.collection.query(
-            query_embeddings=[query_embedding],
-            n_results=n_results,
-            include=["distances", "documents", "metadatas"],
-        )
-
-    def count(self) -> int:
-        return int(self.collection.count())
-
-
 class KnowledgeIndexService:
     def __init__(
         self,
         repository: SQLiteRepository,
         *,
-        vector_index: VectorIndex,
-        embed_texts: Callable[[list[str]], list[list[float]]],
+        lc_embeddings: Embeddings,
+        persist_dir: Path,
+        collection_name: str,
         embedding_model: str,
         embedding_version: str,
         chunk_size: int,
         chunk_overlap: int,
     ) -> None:
         self.repository = repository
-        self.vector_index = vector_index
-        self.embed_texts = embed_texts
         self.embedding_model = embedding_model
         self.embedding_version = embedding_version
         self.chunk_size = chunk_size
         self.chunk_overlap = chunk_overlap
         if self.chunk_overlap >= self.chunk_size:
             raise ValueError("knowledge_chunk_overlap must be smaller than knowledge_chunk_size.")
+
+        # Use langchain-chroma with cosine space so score = cosine similarity in [0,1]
+        self.vector_store = Chroma(
+            collection_name=collection_name,
+            embedding_function=lc_embeddings,
+            persist_directory=str(persist_dir),
+            collection_metadata={"hnsw:space": "cosine"},
+        )
+
         self.text_splitter = RecursiveCharacterTextSplitter(
             chunk_size=self.chunk_size,
             chunk_overlap=self.chunk_overlap,
@@ -132,9 +88,8 @@ class KnowledgeIndexService:
         pages: list[dict[str, Any]] = []
         chunks: list[dict[str, Any]] = []
         chunk_page_links: list[dict[str, str]] = []
+        lc_docs: list[Document] = []
         vector_ids: list[str] = []
-        vector_texts: list[str] = []
-        vector_metadatas: list[dict[str, Any]] = []
 
         for video in videos:
             video_id = str(video["video_id"])
@@ -214,28 +169,22 @@ class KnowledgeIndexService:
                     for page in page_spans
                     if chunk_start < int(page["end_index"]) and chunk_end > int(page["start_index"])
                 )
-                vector_ids.append(vector_document_id)
-                vector_texts.append(chunk_text)
-                vector_metadatas.append(
-                    {
-                        "chunk_id": chunk_id,
-                        "video_id": video_id,
-                        "source_type": source_type,
-                    }
+                # Build LangChain Document for vector store (embedding done internally)
+                lc_docs.append(
+                    Document(
+                        page_content=chunk_text,
+                        metadata={
+                            "chunk_id": chunk_id,
+                            "video_id": video_id,
+                            "source_type": source_type,
+                        },
+                    )
                 )
+                vector_ids.append(vector_document_id)
 
+        # langchain-chroma handles embedding internally via lc_embeddings
         try:
-            embeddings = self.embed_texts(vector_texts)
-        except Exception as exc:
-            raise RuntimeError(f"Embedding generation failed: {exc}") from exc
-
-        try:
-            self.vector_index.upsert(
-                ids=vector_ids,
-                embeddings=embeddings,
-                documents=vector_texts,
-                metadatas=vector_metadatas,
-            )
+            self.vector_store.add_documents(lc_docs, ids=vector_ids)
         except Exception as exc:
             self._safe_delete_vectors(vector_ids)
             raise RuntimeError(f"Vector index upsert failed: {exc}") from exc
@@ -265,41 +214,44 @@ class KnowledgeIndexService:
     def search(self, payload: dict[str, Any]) -> dict[str, Any]:
         query = str(payload["query"])
         top_k = int(payload.get("top_k", 5))
-        if self.vector_index.count() == 0:
-            return {"query": query, "total_hits": 0, "hits": []}
 
-        try:
-            query_embedding = self.embed_texts([query])[0]
-        except Exception as exc:
-            raise RuntimeError(f"Embedding generation failed: {exc}") from exc
+        # Check if collection is empty
+        if self.vector_store._collection.count() == 0:
+            return {"query": query, "total_hits": 0, "hits": []}
 
         candidate_count = max(top_k * 5, 20)
-        #向量搜索
-        raw = self.vector_index.query(query_embedding=query_embedding, n_results=candidate_count)
-        ids = raw.get("ids", [[]])
-        distances = raw.get("distances", [[]])
-        if not ids or not ids[0]:
+
+        # similarity_search_with_relevance_scores returns (Document, score)
+        # score is cosine similarity in [0, 1] because hnsw:space=cosine
+        try:
+            results = self.vector_store.similarity_search_with_relevance_scores(
+                query, k=candidate_count
+            )
+        except Exception as exc:
+            raise RuntimeError(f"Vector search failed: {exc}") from exc
+
+        if not results:
             return {"query": query, "total_hits": 0, "hits": []}
 
-        candidate_ids = [
-            str(vector_id).split(":", 1)[1]
-            for vector_id in ids[0]
-            if ":" in str(vector_id)
-        ]
-        distance_by_chunk_id = {
-            str(vector_id).split(":", 1)[1]: float(distance)
-            for vector_id, distance in zip(ids[0], distances[0], strict=False)
-            if ":" in str(vector_id)
-        }
+        candidate_chunk_ids: list[str] = []
+        score_by_chunk_id: dict[str, float] = {}
+        for doc, score in results:
+            chunk_id = doc.metadata.get("chunk_id")
+            if chunk_id:
+                candidate_chunk_ids.append(str(chunk_id))
+                score_by_chunk_id[str(chunk_id)] = float(score)
 
-        details = self.repository.get_knowledge_chunk_details(candidate_ids)
+        if not candidate_chunk_ids:
+            return {"query": query, "total_hits": 0, "hits": []}
+
+        details = self.repository.get_knowledge_chunk_details(candidate_chunk_ids)
         filtered_hits: list[dict[str, Any]] = []
         for detail in details:
             if not self._matches_filters(detail, payload):
                 continue
             filtered_hits.append(
                 {
-                    "score": max(0.0, 1.0 - distance_by_chunk_id.get(detail["chunk_id"], 1.0)),
+                    "score": score_by_chunk_id.get(detail["chunk_id"], 0.0),
                     "chunk_id": detail["chunk_id"],
                     "text": detail["text"],
                     "source_type": detail["source_type"],
@@ -415,6 +367,6 @@ class KnowledgeIndexService:
 
     def _safe_delete_vectors(self, vector_ids: list[str]) -> None:
         try:
-            self.vector_index.delete(vector_ids)
+            self.vector_store.delete(ids=vector_ids)
         except Exception:
             pass

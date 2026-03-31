@@ -1,6 +1,7 @@
 import httpx
 from openai import OpenAI
 from langchain_openai import ChatOpenAI
+from langchain_core.embeddings import Embeddings
 from langchain_core.messages import SystemMessage, HumanMessage, AIMessage
 
 
@@ -86,9 +87,11 @@ class OpenAICompatibleLLM:
             kwargs: dict = {
                 "model": self.model,
                 "temperature": 0.2,
-                "timeout": 10,
+                "timeout": 120,
                 "http_client": httpx.Client(proxy=None, trust_env=False),
                 "http_async_client": httpx.AsyncClient(proxy=None, trust_env=False),
+                # Disable thinking mode for qwen3 models to avoid long delays
+                "extra_body": {"thinking": {"type": "disabled"}},
             }
             if self.api_key:
                 kwargs["api_key"] = self.api_key
@@ -253,5 +256,22 @@ class OpenAICompatibleLLM:
             "General chat is available, but no LLM provider is configured yet. "
             "Set LLM_API_KEY to enable model responses."
         )
+
+
+class LangChainEmbeddingsAdapter(Embeddings):
+    """Wraps OpenAICompatibleLLM.embed_texts() as a LangChain Embeddings interface.
+
+    This allows the existing embed_texts logic (including DashScope routing)
+    to be used directly with langchain-chroma and other LangChain components.
+    """
+
+    def __init__(self, llm: "OpenAICompatibleLLM") -> None:
+        self._llm = llm
+
+    def embed_documents(self, texts: list[str]) -> list[list[float]]:
+        return self._llm.embed_texts(texts)
+
+    def embed_query(self, text: str) -> list[float]:
+        return self._llm.embed_texts([text])[0]
 
 

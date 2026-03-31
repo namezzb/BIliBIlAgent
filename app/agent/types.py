@@ -1,4 +1,4 @@
-from typing import Any, Literal, TypedDict
+from typing import Any, Literal, TypedDict, Annotated
 
 from pydantic import BaseModel, Field
 
@@ -40,6 +40,18 @@ class RouteDecision(BaseModel):
     reason: str = Field(
         description="One-sentence explanation of why this route was chosen (for debugging)."
     )
+    mentioned_bvids: list[str] = Field(
+        default_factory=list,
+        description="BV IDs explicitly mentioned in the message, e.g. ['BV1xx', 'BV2yy']. Empty list if none.",
+    )
+    mentioned_video_titles: list[str] = Field(
+        default_factory=list,
+        description="Video titles explicitly mentioned by the user. Empty list if none.",
+    )
+    mentioned_folder_names: list[str] = Field(
+        default_factory=list,
+        description="Favorite folder names explicitly mentioned by the user. Empty list if none.",
+    )
 
 
 RunStatus = Literal["running", "completed", "awaiting_confirmation", "cancelled", "failed"]
@@ -78,6 +90,19 @@ class ExecutionPlan(TypedDict, total=False):
     tool_calls: list[PlannedToolCall]
 
 
+def _keep_latest_retrieval(
+    old: "dict[str, Any] | None",
+    new: "dict[str, Any] | None",
+) -> "dict[str, Any] | None":
+    """Reducer: keep the latest non-None retrieval_result across graph turns.
+
+    LangGraph checkpointer persists AgentState between turns. With this reducer,
+    the previous turn's retrieval_result is available in state for scope inheritance
+    in _resolve_scope, without needing manual recent_context bookkeeping.
+    """
+    return new if new is not None else old
+
+
 class AgentState(TypedDict, total=False):
     session_id: str
     user_id: str | None
@@ -91,10 +116,14 @@ class AgentState(TypedDict, total=False):
     route: RouteType
     # Fine-grained hint passed to retrieve_knowledge for scope resolution
     retrieval_scope_hint: RetrievalScopeHint | None
+    # LLM-identified entity references from the router (used by _resolve_scope)
+    mentioned_bvids: list[str]
+    mentioned_video_titles: list[str]
+    mentioned_folder_names: list[str]
     status: RunStatus
     requires_confirmation: bool
     approval_status: Literal["approved", "rejected"] | None
     pending_actions: list[PendingAction]
     execution_plan: ExecutionPlan | None
-    retrieval_result: dict[str, Any] | None
+    retrieval_result: Annotated[dict[str, Any] | None, _keep_latest_retrieval]
     response: str
