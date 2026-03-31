@@ -7,9 +7,13 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.types import Command, interrupt
 
 from app.agent.types import (
+    ActionDecision,
+    ActionRouteType,
     AgentState,
     ExecutionPlan,
     ExecutionStep,
+    IntentDecision,
+    KnowledgeScopeDecision,
     PendingAction,
     PlannedToolCall,
     RouteDecision,
@@ -22,36 +26,52 @@ from app.services.knowledge_retrieval import KnowledgeRetrievalService
 from app.services.llm import OpenAICompatibleLLM
 from app.services.user_memory import UserMemoryManager
 
-_ROUTER_SYSTEM_PROMPT = """\
-You are the intent router for BIliBIlAgent. Classify the user message into exactly one route:
+_INTENT_SYSTEM_PROMPT = """\
+You are the first-stage intent router for BIliBIlAgent. Classify the user message into exactly one coarse intent:
 
-- general_chat          — casual conversation, greetings, or questions unrelated to Bilibili content
-- favorite_knowledge_query — questions about what is in the user's favorite folder(s) or multiple videos
-- video_knowledge_query — questions about the content of a specific video (mentions BV/AV ID, "这个视频", "这期", page number, etc.)
-- import_request        — user wants to import / sync / add a favorite folder or videos into the knowledge base
-- retry_request         — user wants to retry a previously failed import task
+- chat       — casual conversation, greetings, thanks, or requests that do not need the local Bilibili knowledge base
+- knowledge  — questions asking about concepts, explanations, comparisons, video content, favorite-folder content, or follow-up questions that should use the local knowledge base
+- action     — user wants the system to execute a side-effectful operation such as import / sync / retry
 
 Rules:
-1. If the message mentions importing AND querying, prefer import_request.
-2. If unsure between favorite_knowledge_query and video_knowledge_query, prefer favorite_knowledge_query.
-3. Default to general_chat when no specific route fits.
-4. For mentioned_bvids: extract any BV/AV IDs found in the message (e.g. BV1xx411c7mD). Empty list if none.
-5. For mentioned_video_titles: extract explicit video title strings the user refers to. Empty list if none.
-6. For mentioned_folder_names: extract explicit favorite folder names the user refers to. Empty list if none.
-7. Reply ONLY with the structured JSON — no extra text.
+1. If the user is asking what something is, how it works, differences, principles, explanations, or "这个视频/这个收藏夹还讲了什么", prefer knowledge.
+2. If the user asks to import, sync, add, retry, rerun, or execute something, prefer action.
+3. Use chat only when the message is ordinary conversation or clearly unrelated to local knowledge retrieval and execution.
+4. Reply ONLY with the structured JSON — no extra text.
 """
 
-_LLM_ROUTE_TO_GRAPH_ROUTE: dict[str, RouteType] = {
-    "general_chat": "general_chat",
-    "favorite_knowledge_query": "knowledge_query",
-    "video_knowledge_query": "knowledge_query",
+_KNOWLEDGE_SCOPE_SYSTEM_PROMPT = """\
+You are the second-stage knowledge scope parser for BIliBIlAgent. The message is already known to be a knowledge query.
+Classify the scope into exactly one of:
+
+- general_knowledge_query  — concept/explanation questions without a specific video or folder target
+- favorite_knowledge_query — asking about a favorite folder, multiple videos, or broad library/folder content
+- video_knowledge_query    — asking about a specific video, BV/AV ID, a specific episode/page, or follow-up references like "这个视频"
+
+Rules:
+1. If the message mentions BV/AV, a specific video, page number, or "这个视频/这期", prefer video_knowledge_query.
+2. If the message mentions a favorite folder or asks for multiple related videos, prefer favorite_knowledge_query.
+3. If the message asks about a concept, principle, meaning, difference, or explanation without a clear target, prefer general_knowledge_query.
+4. Extract mentioned_bvids, mentioned_video_titles, and mentioned_folder_names when explicit.
+5. Reply ONLY with the structured JSON — no extra text.
+"""
+
+_ACTION_SYSTEM_PROMPT = """\
+You are the second-stage action parser for BIliBIlAgent. The message is already known to be an action request.
+Classify it into exactly one action:
+
+- import_request — import / sync / ingest favorite-folder or video content into the local knowledge base
+- retry_request  — retry previously failed import or ingestion tasks
+
+Rules:
+1. If the message explicitly mentions retrying, rerunning failed items, or trying again, prefer retry_request.
+2. Otherwise prefer import_request.
+3. Reply ONLY with the structured JSON — no extra text.
+"""
+
+_ACTION_ROUTE_TO_GRAPH_ROUTE: dict[str, RouteType] = {
     "import_request": "plan_and_solve",
     "retry_request": "plan_and_solve",
-}
-
-_LLM_ROUTE_TO_SCOPE_HINT: dict[str, RetrievalScopeHint] = {
-    "favorite_knowledge_query": "favorite_knowledge_query",
-    "video_knowledge_query": "video_knowledge_query",
 }
 
 
@@ -73,7 +93,9 @@ class AgentOrchestrator:
         self.knowledge_retrieval_service = knowledge_retrieval_service
         self.knowledge_qa = knowledge_qa
         self.checkpointer = checkpointer
-        self._router_llm = llm.get_lc_chat_model().with_structured_output(RouteDecision)
+        self._intent_llm = llm.get_lc_chat_model().with_structured_output(IntentDecision)
+        self._knowledge_scope_llm = llm.get_lc_chat_model().with_structured_output(KnowledgeScopeDecision)
+        self._action_llm = llm.get_lc_chat_model().with_structured_output(ActionDecision)
         self.graph = self._build_graph()
 
     def close(self) -> None:
@@ -292,25 +314,47 @@ class AgentOrchestrator:
         return {}
 
     def _router(self, state: AgentState) -> dict[str, Any]:
-        """Classify message into 3-way RouteType + fine-grained retrieval_scope_hint."""
-        decision = self._llm_detect_route_decision(state["current_message"])
-        # Fallback fix: concept-style questions should prefer knowledge retrieval
-        # when local knowledge already exists, even if LLM routed to general_chat.
-        decision = self._coerce_route_for_knowledge_query(state["current_message"], decision)
-        graph_route: RouteType = _LLM_ROUTE_TO_GRAPH_ROUTE[decision.route]
-        scope_hint: RetrievalScopeHint | None = _LLM_ROUTE_TO_SCOPE_HINT.get(decision.route)
+        """Classify message via coarse intent, then refine into scope/action subtype."""
+        message = state["current_message"]
+        intent_decision = self._detect_intent(message)
+
+        graph_route: RouteType = "general_chat"
+        retrieval_scope_hint: RetrievalScopeHint | None = None
+        action_route: ActionRouteType | None = None
+        mentioned_bvids: list[str] = []
+        mentioned_video_titles: list[str] = []
+        mentioned_folder_names: list[str] = []
+        output_summary = f"intent={intent_decision.intent}"
+
+        if intent_decision.intent == "knowledge":
+            scope_decision = self._detect_knowledge_scope(message)
+            graph_route = "knowledge_query"
+            retrieval_scope_hint = scope_decision.scope
+            mentioned_bvids = scope_decision.mentioned_bvids
+            mentioned_video_titles = scope_decision.mentioned_video_titles
+            mentioned_folder_names = scope_decision.mentioned_folder_names
+            output_summary = (
+                f"intent=knowledge scope={scope_decision.scope}"
+            )
+        elif intent_decision.intent == "action":
+            action_decision = self._detect_action_type(message)
+            action_route = action_decision.action
+            graph_route = _ACTION_ROUTE_TO_GRAPH_ROUTE[action_decision.action]
+            output_summary = f"intent=action action={action_decision.action}"
+
         self.repository.upsert_run_step(
             state["run_id"], "router", "router", "completed",
-            input_summary=state["current_message"],
-            output_summary=f"llm_route={decision.route} -> route={graph_route}",
+            input_summary=message,
+            output_summary=output_summary,
         )
         return {
+            "intent": intent_decision.intent,
+            "action_route": action_route,
             "route": graph_route,
-            "retrieval_scope_hint": scope_hint,
-            # Pass LLM-identified entity references to scope resolution
-            "mentioned_bvids": decision.mentioned_bvids,
-            "mentioned_video_titles": decision.mentioned_video_titles,
-            "mentioned_folder_names": decision.mentioned_folder_names,
+            "retrieval_scope_hint": retrieval_scope_hint,
+            "mentioned_bvids": mentioned_bvids,
+            "mentioned_video_titles": mentioned_video_titles,
+            "mentioned_folder_names": mentioned_folder_names,
         }
 
     def _general_chat(self, state: AgentState) -> dict[str, Any]:
@@ -394,10 +438,7 @@ class AgentOrchestrator:
 
     def _plan_and_solve(self, state: AgentState) -> dict[str, Any]:
         """Build an execution plan for import/retry requests and request user confirmation."""
-        # Recover the original fine-grained llm_route from scope_hint to pick
-        # the right tool; both import_request and retry_request land here.
-        # We derive intent from the keyword fallback on the original message.
-        raw_route = self._keyword_detect_plan_route(state["current_message"])
+        raw_route = state.get("action_route") or self._detect_action_type(state["current_message"]).action
         execution_plan = self._build_execution_plan(raw_route, state["current_message"])
         pending_actions = self._pending_actions_from_execution_plan(execution_plan)
         response = (
@@ -507,86 +548,135 @@ class AgentOrchestrator:
     # LLM / keyword routing helpers
     # ------------------------------------------------------------------
 
-    def _llm_detect_route_decision(self, message: str) -> RouteDecision:
-        """Use LLM structured output to classify message and extract entity references."""
+    def _detect_intent(self, message: str) -> IntentDecision:
         if not self.llm.api_key:
-            return self._keyword_detect_route_decision(message)
+            return self._keyword_detect_intent(message)
         try:
-            decision: RouteDecision = self._router_llm.invoke(
+            decision: IntentDecision = self._intent_llm.invoke(
                 [
-                    SystemMessage(content=_ROUTER_SYSTEM_PROMPT),
+                    SystemMessage(content=_INTENT_SYSTEM_PROMPT),
                     HumanMessage(content=message),
                 ]
             )
             return decision
         except Exception:
-            return self._keyword_detect_route_decision(message)
+            return self._keyword_detect_intent(message)
 
-    def _keyword_detect_route_decision(self, message: str) -> RouteDecision:
-        """Keyword fallback returning a RouteDecision with empty entity lists."""
-        route = self._keyword_detect_llm_route(message)
-        return RouteDecision(route=route, reason="keyword fallback")
-
-    def _keyword_detect_llm_route(self, message: str) -> str:
-        """Keyword fallback returning the fine-grained 5-way route string."""
-        lowered = message.lower()
-        retry_kw = ("重试", "retry", "重新执行", "重跑", "失败项")
-        import_kw = ("导入", "import", "同步", "sync", "导进知识库", "拉取")
-        video_kw = ("bv", "av", "分p", "这一期", "这个视频", "这期视频")
-        knowledge_kw = ("讲了什么", "内容", "知识库", "字幕", "qa", "相关视频", "有哪些")
-
-        if any(k in lowered for k in retry_kw):
-            return "retry_request"
-        if any(k in lowered for k in import_kw):
-            return "import_request"
-        if "收藏夹" in lowered and any(k in lowered for k in knowledge_kw):
-            return "favorite_knowledge_query"
-        if any(k in lowered for k in video_kw) and any(k in lowered for k in knowledge_kw + ("讲了什么",)):
-            return "video_knowledge_query"
-        if any(k in lowered for k in ("bv", "av", "分p", "这个视频", "这期视频")):
-            return "video_knowledge_query"
-        return "general_chat"
-
-    def _keyword_detect_plan_route(self, message: str) -> str:
-        """Distinguish import_request vs retry_request for plan_and_solve node."""
-        lowered = message.lower()
-        if any(k in lowered for k in ("重试", "retry", "重新执行", "重跑", "失败项")):
-            return "retry_request"
-        return "import_request"
-
-    def _coerce_route_for_knowledge_query(
-        self,
-        message: str,
-        decision: RouteDecision,
-    ) -> RouteDecision:
-        """Force concept-style questions into knowledge retrieval when appropriate.
-
-        This is a conservative post-router correction for cases like
-        "注意力机制是什么？" where the LLM may choose general_chat even though
-        the local knowledge base contains relevant indexed chunks.
-        """
-        if decision.route != "general_chat":
+    def _detect_knowledge_scope(self, message: str) -> KnowledgeScopeDecision:
+        if not self.llm.api_key:
+            return self._keyword_detect_knowledge_scope(message)
+        try:
+            decision: KnowledgeScopeDecision = self._knowledge_scope_llm.invoke(
+                [
+                    SystemMessage(content=_KNOWLEDGE_SCOPE_SYSTEM_PROMPT),
+                    HumanMessage(content=message),
+                ]
+            )
             return decision
-        if not self._looks_like_concept_question(message):
-            return decision
-        if not self.repository.list_knowledge_videos():
-            return decision
-        return decision.model_copy(update={
-            "route": "favorite_knowledge_query",
-            "reason": f"{decision.reason}; coerced to favorite_knowledge_query by concept-question heuristic",
-        })
+        except Exception:
+            return self._keyword_detect_knowledge_scope(message)
 
-    def _looks_like_concept_question(self, message: str) -> bool:
+    def _detect_action_type(self, message: str) -> ActionDecision:
+        if not self.llm.api_key:
+            return self._keyword_detect_action_type(message)
+        try:
+            decision: ActionDecision = self._action_llm.invoke(
+                [
+                    SystemMessage(content=_ACTION_SYSTEM_PROMPT),
+                    HumanMessage(content=message),
+                ]
+            )
+            return decision
+        except Exception:
+            return self._keyword_detect_action_type(message)
+
+    def _keyword_detect_intent(self, message: str) -> IntentDecision:
         lowered = message.lower().strip()
-        # Do not hijack obvious general chat or task-execution intents.
-        if any(k in lowered for k in ("你好", "hello", "hi", "谢谢", "导入", "import", "重试", "retry")):
-            return False
-        concept_tokens = (
-            "是什么", "什么意思", "什么是", "原理", "作用", "区别", "怎么理解",
-            "为什么", "如何理解", "概念", "机制", "用途", "怎么实现", "是什么？", "是啥"
+        if self._looks_like_action_request(lowered):
+            return IntentDecision(intent="action", reason="keyword fallback: action request")
+        if self._looks_like_knowledge_query(lowered):
+            return IntentDecision(intent="knowledge", reason="keyword fallback: knowledge query")
+        return IntentDecision(intent="chat", reason="keyword fallback: chat")
+
+    def _keyword_detect_knowledge_scope(self, message: str) -> KnowledgeScopeDecision:
+        lowered = message.lower().strip()
+        mentioned_bvids = self._extract_bvids(message)
+        mentioned_video_titles = self._extract_explicit_video_titles(message)
+        mentioned_folder_names = self._extract_explicit_folder_names(message)
+
+        if self._looks_like_video_scope(lowered, mentioned_bvids, mentioned_video_titles):
+            return KnowledgeScopeDecision(
+                scope="video_knowledge_query",
+                reason="keyword fallback: video-focused knowledge query",
+                mentioned_bvids=mentioned_bvids,
+                mentioned_video_titles=mentioned_video_titles,
+                mentioned_folder_names=mentioned_folder_names,
+            )
+        if self._looks_like_folder_scope(lowered, mentioned_folder_names):
+            return KnowledgeScopeDecision(
+                scope="favorite_knowledge_query",
+                reason="keyword fallback: folder-focused knowledge query",
+                mentioned_bvids=mentioned_bvids,
+                mentioned_video_titles=mentioned_video_titles,
+                mentioned_folder_names=mentioned_folder_names,
+            )
+        return KnowledgeScopeDecision(
+            scope="general_knowledge_query",
+            reason="keyword fallback: general knowledge query",
+            mentioned_bvids=mentioned_bvids,
+            mentioned_video_titles=mentioned_video_titles,
+            mentioned_folder_names=mentioned_folder_names,
         )
-        question_mark = "?" in lowered or "？" in lowered
-        return question_mark or any(token in lowered for token in concept_tokens)
+
+    def _keyword_detect_action_type(self, message: str) -> ActionDecision:
+        lowered = message.lower().strip()
+        if any(k in lowered for k in ("重试", "retry", "重新执行", "重跑", "失败项")):
+            return ActionDecision(action="retry_request", reason="keyword fallback: retry request")
+        return ActionDecision(action="import_request", reason="keyword fallback: import request")
+
+    def _looks_like_action_request(self, lowered: str) -> bool:
+        return any(k in lowered for k in ("导入", "import", "同步", "sync", "导进知识库", "拉取", "重试", "retry", "重新执行", "重跑", "失败项"))
+
+    def _looks_like_knowledge_query(self, lowered: str) -> bool:
+        if any(k in lowered for k in ("你好", "hello", "hi", "谢谢", "thank", "你是谁")):
+            return False
+        if self._looks_like_action_request(lowered):
+            return False
+        knowledge_tokens = (
+            "是什么", "什么意思", "什么是", "原理", "作用", "区别", "怎么理解",
+            "为什么", "如何理解", "概念", "机制", "用途", "怎么实现", "讲了什么",
+            "内容", "知识库", "字幕", "qa", "相关视频", "有哪些", "这个视频", "这期视频", "收藏夹"
+        )
+        return ("?" in lowered or "？" in lowered or any(token in lowered for token in knowledge_tokens))
+
+    def _looks_like_video_scope(
+        self,
+        lowered: str,
+        mentioned_bvids: list[str],
+        mentioned_video_titles: list[str],
+    ) -> bool:
+        if mentioned_bvids or mentioned_video_titles:
+            return True
+        return any(k in lowered for k in ("bv", "av", "分p", "这一期", "这个视频", "这期视频", "第1p", "第2p", "p1", "p2"))
+
+    def _looks_like_folder_scope(self, lowered: str, mentioned_folder_names: list[str]) -> bool:
+        if mentioned_folder_names:
+            return True
+        return "收藏夹" in lowered
+
+    def _extract_bvids(self, message: str) -> list[str]:
+        return sorted({token.upper() for token in message.split() if token.upper().startswith("BV")})
+
+    def _extract_explicit_video_titles(self, message: str) -> list[str]:
+        videos = self.repository.list_knowledge_videos()
+        lowered = message.lower()
+        return sorted({str(video["title"]) for video in videos if str(video["title"]).lower() in lowered})
+
+    def _extract_explicit_folder_names(self, message: str) -> list[str]:
+        folders = self.repository.list_knowledge_favorite_folders()
+        lowered = message.lower()
+        return sorted({str(folder["title"]) for folder in folders if str(folder["title"]).lower() in lowered})
+
 
     # ------------------------------------------------------------------
     # Execution plan helpers

@@ -30,5 +30,6 @@ api.interceptors.response.use(
   }
 );
 
-// For SSE EventSource (must be absolute URL)
-export const apiBase = 'http://localhost:8000';
+// For SSE/fetch streaming use same hostname as current frontend page to avoid localhost vs 127.0.0.1 CORS mismatches.
+const browserHost = typeof window !== 'undefined' ? window.location.hostname : '127.0.0.1';
+export const apiBase = import.meta.env.VITE_API_BASE ?? `http://${browserHost}:8000`;

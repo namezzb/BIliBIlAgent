@@ -21,9 +21,7 @@ interface Message {
   executionPlan?: any;
   requiresConfirmation?: boolean;
   approvalStatus?: string;
-  /** true while tokens are still streaming in */
   streaming?: boolean;
-  /** agent node steps for status display */
   agentSteps?: AgentStep[];
 }
 
@@ -33,13 +31,18 @@ const routeLabel: Record<string, string> = {
   video_knowledge_query: '视频问答',
   import_request: '导入任务',
   retry_request: '重试任务',
+  knowledge_query: '知识问答',
+  plan_and_solve: '执行任务',
 };
+
 const routeTagClass: Record<string, string> = {
   general_chat: 'tag-gray',
   favorite_knowledge_query: 'tag-orange',
   video_knowledge_query: 'tag-blue',
   import_request: 'tag-green',
   retry_request: 'tag-yellow',
+  knowledge_query: 'tag-blue',
+  plan_and_solve: 'tag-green',
 };
 
 function genId() { return Math.random().toString(36).slice(2); }
@@ -108,7 +111,6 @@ export default function ChatPage() {
 
   const addMsg = useCallback((m: Message) => setMessages(prev => [...prev, m]), []);
 
-  /** Append tokens to the last streaming assistant message */
   const appendToken = useCallback((token: string) => {
     setMessages(prev => {
       if (prev.length === 0) return prev;
@@ -120,7 +122,6 @@ export default function ChatPage() {
     });
   }, []);
 
-  /** Update agent step status on the last streaming assistant message */
   const updateAgentStep = useCallback((node: string, data: Record<string, unknown>) => {
     setMessages(prev => {
       if (prev.length === 0) return prev;
@@ -138,7 +139,6 @@ export default function ChatPage() {
     });
   }, []);
 
-  /** Finalise the last streaming message with the done payload */
   const finalizeStreamingMsg = useCallback((done: StreamChunk & { type: 'done' }) => {
     setMessages(prev => {
       if (prev.length === 0) return prev;
@@ -148,7 +148,6 @@ export default function ChatPage() {
           ...prev.slice(0, -1),
           {
             ...last,
-            // Only replace content if reply is non-empty (e.g. for confirmation messages)
             content: done.reply || last.content,
             route: done.route ?? last.route,
             runId: last.runId ?? done.run_id,
@@ -162,7 +161,6 @@ export default function ChatPage() {
       }
       return prev;
     });
-    sessionId.current = done.run_id ? sessionId.current : sessionId.current;
   }, []);
 
   const handleSend = async () => {
@@ -172,7 +170,6 @@ export default function ChatPage() {
     addMsg({ id: genId(), role: 'user', content: text });
     setLoading(true);
 
-    // Placeholder streaming bubble
     const bubbleId = genId();
     addMsg({ id: bubbleId, role: 'assistant', content: '', streaming: true });
 
@@ -187,7 +184,6 @@ export default function ChatPage() {
           } else if (chunk.type === 'node') {
             updateAgentStep(chunk.node, chunk.data);
           } else if (chunk.type === 'interrupt') {
-            // Interrupt payload arrives before done — update bubble with plan info
             setMessages(prev => {
               const last = prev[prev.length - 1];
               if (last.role === 'assistant' && last.streaming) {
@@ -207,9 +203,7 @@ export default function ChatPage() {
         abortRef.current.signal,
       );
 
-      // Update session id from X-Run-Id header is already in done.run_id
       if (done.run_id) {
-        // Store run_id on the bubble so confirm button can use it
         setMessages(prev => {
           const last = prev[prev.length - 1];
           if (last.role === 'assistant' && last.streaming) {
@@ -247,12 +241,10 @@ export default function ChatPage() {
   const handleConfirm = async (runId: string, approved: boolean) => {
     setConfirming(prev => ({ ...prev, [runId]: true }));
 
-    // Mark the original bubble as no longer requiring confirmation
     setMessages(prev => prev.map(m =>
       m.runId === runId ? { ...m, requiresConfirmation: false } : m
     ));
 
-    // Add a new streaming bubble for the resume response
     addMsg({ id: genId(), role: 'assistant', content: '', streaming: true });
 
     try {
@@ -300,8 +292,10 @@ export default function ChatPage() {
       <div className="chat-messages">
         {messages.length === 0 && (
           <div className="chat-empty">
+            <div className="chat-empty-badge">BIliBIl Agent</div>
             <div className="chat-empty-icon">◎</div>
-            <p>向 Agent 提问，或询问你的 B 站收藏夹内容</p>
+            <h2 className="chat-empty-title">开始一次新的知识对话</h2>
+            <p className="chat-empty-desc">你可以询问收藏夹内容、指定某个视频提问，或者直接发起导入任务。</p>
             <div className="chat-hints">
               {['我的收藏夹里有什么关于 React 的视频？', '这个视频讲了什么？', '帮我导入收藏夹'].map(h => (
                 <button key={h} className="hint-chip" onClick={() => { setInput(h); }}>{h}</button>
@@ -346,7 +340,7 @@ export default function ChatPage() {
                       disabled={!!confirming[m.runId]}
                       onClick={() => handleConfirm(m.runId!, true)}
                     >
-                      {confirming[m.runId] ? <><div className="spinner" style={{width:14,height:14}}/> 处理中</> : '✓ 确认执行'}
+                      {confirming[m.runId] ? '处理中...' : '✓ 确认执行'}
                     </button>
                     <button
                       className="btn btn-danger"
@@ -371,20 +365,26 @@ export default function ChatPage() {
       </div>
 
       <div className="chat-input-bar">
-        <textarea
-          className="chat-textarea"
-          value={input}
-          onChange={(e) => setInput(e.target.value)}
-          onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleSend(); } }}
-          placeholder="输入消息，Enter 发送，Shift+Enter 换行..."
-          rows={2}
-        />
-        <button className="btn btn-primary chat-send-btn" onClick={handleSend} disabled={loading || !input.trim()}>
-          {loading
-            ? <button className="btn btn-ghost" style={{padding:'2px 8px', fontSize:12}} onClick={() => abortRef.current?.abort()}>■ 停止</button>
-            : '发送'
-          }
-        </button>
+        <div className="chat-input-wrap">
+          <textarea
+            className="chat-textarea"
+            value={input}
+            onChange={(e) => setInput(e.target.value)}
+            onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleSend(); } }}
+            placeholder="输入消息，Enter 发送，Shift+Enter 换行..."
+            rows={2}
+          />
+          <div className="chat-input-hint">Enter 发送 · Shift+Enter 换行</div>
+        </div>
+        {loading ? (
+          <button className="btn btn-ghost chat-stop-btn" onClick={() => abortRef.current?.abort()}>
+            ■ 停止
+          </button>
+        ) : (
+          <button className="btn btn-primary chat-send-btn" onClick={handleSend} disabled={!input.trim()}>
+            发送
+          </button>
+        )}
       </div>
     </div>
   );
