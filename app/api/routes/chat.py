@@ -127,6 +127,22 @@ def _execute_bilibili_import_in_background(
         return None
 
 
+@router.get("/runs/imports")
+def list_import_runs(request: Request) -> dict:
+    repository = request.app.state.repository
+    return {
+        "items": repository.list_import_runs(),
+    }
+
+
+@router.get("/runs/imports")
+def list_import_runs(request: Request) -> dict:
+    repository = request.app.state.repository
+    return {
+        "items": repository.list_import_runs(),
+    }
+
+
 @router.get("/runs/{run_id}/import-items")
 def get_run_import_items(run_id: str, request: Request) -> dict:
     repository = request.app.state.repository

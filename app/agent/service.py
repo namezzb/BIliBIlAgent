@@ -294,6 +294,9 @@ class AgentOrchestrator:
     def _router(self, state: AgentState) -> dict[str, Any]:
         """Classify message into 3-way RouteType + fine-grained retrieval_scope_hint."""
         decision = self._llm_detect_route_decision(state["current_message"])
+        # Fallback fix: concept-style questions should prefer knowledge retrieval
+        # when local knowledge already exists, even if LLM routed to general_chat.
+        decision = self._coerce_route_for_knowledge_query(state["current_message"], decision)
         graph_route: RouteType = _LLM_ROUTE_TO_GRAPH_ROUTE[decision.route]
         scope_hint: RetrievalScopeHint | None = _LLM_ROUTE_TO_SCOPE_HINT.get(decision.route)
         self.repository.upsert_run_step(
@@ -550,6 +553,40 @@ class AgentOrchestrator:
         if any(k in lowered for k in ("重试", "retry", "重新执行", "重跑", "失败项")):
             return "retry_request"
         return "import_request"
+
+    def _coerce_route_for_knowledge_query(
+        self,
+        message: str,
+        decision: RouteDecision,
+    ) -> RouteDecision:
+        """Force concept-style questions into knowledge retrieval when appropriate.
+
+        This is a conservative post-router correction for cases like
+        "注意力机制是什么？" where the LLM may choose general_chat even though
+        the local knowledge base contains relevant indexed chunks.
+        """
+        if decision.route != "general_chat":
+            return decision
+        if not self._looks_like_concept_question(message):
+            return decision
+        if not self.repository.list_knowledge_videos():
+            return decision
+        return decision.model_copy(update={
+            "route": "favorite_knowledge_query",
+            "reason": f"{decision.reason}; coerced to favorite_knowledge_query by concept-question heuristic",
+        })
+
+    def _looks_like_concept_question(self, message: str) -> bool:
+        lowered = message.lower().strip()
+        # Do not hijack obvious general chat or task-execution intents.
+        if any(k in lowered for k in ("你好", "hello", "hi", "谢谢", "导入", "import", "重试", "retry")):
+            return False
+        concept_tokens = (
+            "是什么", "什么意思", "什么是", "原理", "作用", "区别", "怎么理解",
+            "为什么", "如何理解", "概念", "机制", "用途", "怎么实现", "是什么？", "是啥"
+        )
+        question_mark = "?" in lowered or "？" in lowered
+        return question_mark or any(token in lowered for token in concept_tokens)
 
     # ------------------------------------------------------------------
     # Execution plan helpers

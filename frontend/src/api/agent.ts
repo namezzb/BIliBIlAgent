@@ -20,6 +20,9 @@ export const deleteUserMemory = (userId: string, group: string, key: string) =>
 export const getImportItems = (runId: string) =>
   api.get(`/api/runs/${runId}/import-items`).then((r) => r.data);
 
+export const listImportRuns = () =>
+  api.get('/api/runs/imports').then((r) => r.data);
+
 export const knowledgeSearch = (payload: {
   query: string;
   top_k?: number;

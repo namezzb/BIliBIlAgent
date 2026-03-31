@@ -1,0 +1,113 @@
+.tasks-page {}
+
+.tasks-empty {
+  color: var(--text2);
+  font-size: 0.92rem;
+}
+
+.tasks-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+  gap: 1rem;
+}
+
+.task-card {
+  cursor: pointer;
+  transition: transform 0.18s, border-color 0.18s, box-shadow 0.18s;
+}
+.task-card:hover {
+  transform: translateY(-3px);
+  border-color: var(--accent);
+  box-shadow: 0 8px 32px rgba(251,146,60,0.12);
+}
+
+.task-card-top {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 1rem;
+}
+
+.task-label {
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--text3);
+  font-family: var(--font-mono);
+  margin-bottom: 0.35rem;
+}
+
+.task-title {
+  font-size: 0.88rem;
+  line-height: 1.45;
+  color: var(--text);
+  font-family: var(--font-mono);
+  word-break: break-all;
+}
+
+.task-progress {
+  margin-top: 1rem;
+}
+
+.task-progress-track {
+  height: 8px;
+  background: var(--bg4);
+  border-radius: 999px;
+  overflow: hidden;
+}
+
+.task-progress-fill {
+  height: 100%;
+  background: linear-gradient(90deg, var(--accent), var(--accent2));
+  border-radius: 999px;
+}
+
+.task-progress-text {
+  display: inline-block;
+  margin-top: 0.45rem;
+  font-size: 0.76rem;
+  color: var(--text3);
+  font-family: var(--font-mono);
+}
+
+.task-stats {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin-top: 1rem;
+}
+
+.task-stat {
+  padding: 0.24rem 0.6rem;
+  border-radius: 999px;
+  font-size: 0.74rem;
+  font-family: var(--font-mono);
+}
+.task-stat.success { background: var(--green-dim); color: var(--green); }
+.task-stat.info { background: var(--blue-dim); color: var(--blue); }
+.task-stat.mute { background: var(--bg4); color: var(--text3); }
+.task-stat.danger { background: var(--red-dim); color: var(--red); }
+
+.task-reply {
+  margin-top: 1rem;
+  font-size: 0.82rem;
+  color: var(--text2);
+  line-height: 1.5;
+}
+
+.task-meta {
+  margin-top: 1rem;
+  padding-top: 0.9rem;
+  border-top: 1px solid var(--border);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  font-size: 0.75rem;
+  color: var(--text3);
+}
+
+.task-open-btn {
+  padding: 0.35rem 0.7rem;
+  font-size: 0.74rem;
+}

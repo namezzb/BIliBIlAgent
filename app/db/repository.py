@@ -329,6 +329,37 @@ class SQLiteRepository:
         result["execution_plan"] = json.loads(execution_plan_json) if execution_plan_json else None
         return result
 
+    def list_import_runs(self, limit: int = 50) -> list[dict[str, Any]]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT
+                    r.run_id,
+                    r.session_id,
+                    r.intent,
+                    r.route,
+                    r.status,
+                    r.latest_reply,
+                    r.created_at,
+                    r.updated_at,
+                    COUNT(iri.video_id) AS total_items,
+                    SUM(CASE WHEN iri.status = 'indexed' THEN 1 ELSE 0 END) AS indexed_count,
+                    SUM(CASE WHEN iri.status = 'needs_asr' THEN 1 ELSE 0 END) AS needs_asr_count,
+                    SUM(CASE WHEN iri.status = 'skipped_duplicate' THEN 1 ELSE 0 END) AS duplicate_count,
+                    SUM(CASE WHEN iri.status = 'failed' THEN 1 ELSE 0 END) AS failed_count
+                FROM runs r
+                LEFT JOIN import_run_items iri ON iri.run_id = r.run_id
+                WHERE r.route = 'import_request' OR EXISTS (
+                    SELECT 1 FROM import_run_items x WHERE x.run_id = r.run_id
+                )
+                GROUP BY r.run_id
+                ORDER BY r.created_at DESC
+                LIMIT ?
+                """,
+                (limit,),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
     def get_user_memory_profile(self, user_id: str) -> dict[str, Any] | None:
         with self._connect() as connection:
             row = connection.execute(
