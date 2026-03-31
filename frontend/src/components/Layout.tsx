@@ -27,6 +27,9 @@ export default function Layout() {
           <NavLink to="/chat" className={({isActive}) => isActive ? 'nav-item active' : 'nav-item'}>
             <span className="nav-icon">◎</span> 对话
           </NavLink>
+          <NavLink to="/tasks" className={({isActive}) => isActive ? 'nav-item active' : 'nav-item'}>
+            <span className="nav-icon">◫</span> 任务
+          </NavLink>
           <NavLink to="/memory" className={({isActive}) => isActive ? 'nav-item active' : 'nav-item'}>
             <span className="nav-icon">⬡</span> 记忆
           </NavLink>

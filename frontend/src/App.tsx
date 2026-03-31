@@ -3,6 +3,7 @@ import LoginPage from './pages/LoginPage';
 import FoldersPage from './pages/FoldersPage';
 import VideosPage from './pages/VideosPage';
 import ImportProgressPage from './pages/ImportProgressPage';
+import TasksPage from './pages/TasksPage';
 import ChatPage from './pages/ChatPage';
 import MemoryPage from './pages/MemoryPage';
 import Layout from './components/Layout';
@@ -21,6 +22,7 @@ export default function App() {
         <Route element={<Layout />}>
           <Route path="/" element={<RequireAuth><FoldersPage /></RequireAuth>} />
           <Route path="/folders/:folderId/videos" element={<RequireAuth><VideosPage /></RequireAuth>} />
+          <Route path="/tasks" element={<RequireAuth><TasksPage /></RequireAuth>} />
           <Route path="/import/:runId" element={<RequireAuth><ImportProgressPage /></RequireAuth>} />
           <Route path="/chat" element={<ChatPage />} />
           <Route path="/memory" element={<MemoryPage />} />

@@ -87,7 +87,7 @@ export default function VideosPage() {
         favorite_folder_id: folderId,
         selected_video_ids: Array.from(selected),
       });
-      navigate(`/import/${res.run_id}`);
+      navigate(`/tasks`);
     } catch (e: any) {
       setError(e?.response?.data?.detail ?? '提交导入失败');
       setImporting(false);
